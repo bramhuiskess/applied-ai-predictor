@@ -1,7 +1,7 @@
 # Applied AI: voorspellen met (bijna) elke dataset
 
-Schoolproject voor Applied AI (NHL Stenden, 2026/2027). Opdrachtgever: Gerard van der Kolk.
-Team: Gideon, Elmedin, Jesse en Bram.
+Schoolproject voor Applied AI (NHL Stenden, 2026/2027). Opdrachtgever: X-Interactive (Ate) & Gerard van der Kolk.
+Team: Gideon, Elmedin, Jesse, Lucas en Bram.
 
 ## Waar gaat het over?
 
