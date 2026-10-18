@@ -1,0 +1,25 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "absence-forecast",
+  "description": "Expected sickness-absence percentage per department and month (aggregated, synthetic data).",
+  "data_source": { "adapter": "csv-file", "path": "data/absence.csv" },
+  "training": {
+    "target": "absence_pct",
+    "task": "regression",
+    "time_column": "period",
+    "drop_columns": ["department_id"],
+    "units": { "absence_pct": "%", "previous_month_absence_pct": "%", "avg_age": "years" }
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "policy": {
+    "contains_personal_data": true,
+    "special_category_data": true,
+    "reject_unknown_fields": true,
+    "log_feature_values": false,
+    "forbidden_fields": [
+      "diagnosis", "illness_cause", "treatment", "medication",
+      "employee_id", "employee_name", "bsn", "date_of_birth"
+    ],
+    "min_group_size": { "field": "headcount", "min": 5 }
+  }
+}

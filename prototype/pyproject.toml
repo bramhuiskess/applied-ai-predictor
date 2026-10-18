@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "applied-ai-predictor"
+version = "0.1.0"
+description = "Prototype of a modular, model-agnostic prediction backend for tabular data"
+requires-python = ">=3.11"
+# Serving only needs these. The core itself never imports an ML library;
+# onnxruntime is used by the ONNX runner adapter.
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pydantic>=2.5",
+    "numpy>=1.26",
+    "jsonschema>=4.21",
+    "onnxruntime>=1.17",
+]
+
+[project.optional-dependencies]
+train = [
+    "pandas>=2.1",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.3",
+    "skl2onnx>=1.17",
+    "onnxmltools>=1.12",
+    "onnx>=1.15",
+]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+predictor = "predictor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["predictor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::UserWarning", "ignore::DeprecationWarning", "ignore::FutureWarning"]

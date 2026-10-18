@@ -1,0 +1,26 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "greenhouse-climate",
+  "description": "Forecast the greenhouse air temperature one hour ahead from the current climate readings.",
+  "data_source": { "adapter": "csv-file", "path": "data/greenhouse.csv" },
+  "training": {
+    "target": "inside_temp_c",
+    "task": "regression",
+    "time_column": "timestamp",
+    "horizon_steps": 6,
+    "units": {
+      "inside_temp_c": "°C",
+      "outside_temp_c": "°C",
+      "solar_radiation_wm2": "W/m²",
+      "inside_humidity_pct": "%",
+      "co2_ppm": "ppm",
+      "hour_of_day": "h"
+    }
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  }
+}

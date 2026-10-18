@@ -1,0 +1,26 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "machine-anomaly",
+  "description": "Flag unusual machine behaviour without labelled failures (Isolation Forest on AI4I 2020).",
+  "data_source": { "adapter": "csv-file", "path": "data/ai4i2020.csv" },
+  "training": {
+    "task": "anomaly",
+    "evaluation_label": "machine_failure",
+    "rename_columns": {
+      "Type": "product_quality",
+      "Air temperature [K]": "air_temp_k",
+      "Process temperature [K]": "process_temp_k",
+      "Rotational speed [rpm]": "rotational_speed_rpm",
+      "Torque [Nm]": "torque_nm",
+      "Tool wear [min]": "tool_wear_min",
+      "Machine failure": "machine_failure"
+    },
+    "drop_columns": ["UDI", "Product ID", "TWF", "HDF", "PWF", "OSF", "RNF"]
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "machine-failure",
+  "description": "Predict whether a milling machine fails, from process measurements (AI4I 2020 dataset).",
+  "data_source": { "adapter": "csv-file", "path": "data/ai4i2020.csv" },
+  "training": {
+    "target": "machine_failure",
+    "task": "classification",
+    "rename_columns": {
+      "Type": "product_quality",
+      "Air temperature [K]": "air_temp_k",
+      "Process temperature [K]": "process_temp_k",
+      "Rotational speed [rpm]": "rotational_speed_rpm",
+      "Torque [Nm]": "torque_nm",
+      "Tool wear [min]": "tool_wear_min",
+      "Machine failure": "machine_failure"
+    },
+    "drop_columns": ["UDI", "Product ID", "TWF", "HDF", "PWF", "OSF", "RNF"],
+    "units": {
+      "air_temp_k": "K", "process_temp_k": "K", "rotational_speed_rpm": "rpm",
+      "torque_nm": "Nm", "tool_wear_min": "min"
+    }
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  }
+}
