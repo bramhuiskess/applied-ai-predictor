@@ -53,3 +53,5 @@ printf '%s\n' \
 
 step "9. Monitoring"
 curl -sS "$URL/metrics"; echo
+
+step "10. Now open the dashboard: $URL/dashboard"

@@ -30,7 +30,7 @@ Included use cases:
 cd prototype
 docker build -t applied-ai-predictor .          # generates data and trains all use cases
 docker run --rm --network none applied-ai-predictor   # proof: works without any network
-docker run --rm -p 8000:8000 applied-ai-predictor     # reachable on http://localhost:8000
+docker run --rm -p 8000:8000 applied-ai-predictor     # dashboard on http://localhost:8000
 ./scripts/demo.sh                                     # stakeholder demo (9 steps)
 ```
 
@@ -45,8 +45,22 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[train,dev]"
 python scripts/make_datasets.py   # writes data/*.csv (downloads AI4I 2020 once)
 predictor train                   # trains every use case in usecases/
-predictor serve                   # http://127.0.0.1:8000/docs for the interactive API
-pytest                            # 52 tests, ~30 s, fully offline
+predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
+pytest                            # 56 tests, ~30 s, fully offline
+```
+
+### Technical notebook
+
+[`notebooks/model_internals.ipynb`](notebooks/model_internals.ipynb) walks through the model side
+using the trainer's own code: profiling and the JSON Schema, chronological vs. random splits,
+baseline vs. LightGBM (and why F1), the forecast horizon and persistence baseline, Isolation
+Forest, the ONNX export with the float32 threshold bug the parity check catches, and leakage
+detection. It is saved with its outputs, so it can be read without running it. To run it:
+
+```bash
+pip install -e ".[train,notebook]"
+python scripts/make_datasets.py
+jupyter lab notebooks/model_internals.ipynb
 ```
 
 ## Adding a new dataset (no code)
@@ -82,6 +96,7 @@ Retraining creates version 2, 3, and so on. A manifest can pin `"model": {"versi
 predictor/
 ├── core/            identical for every use case; imports no ML library (enforced by tests)
 │   ├── api.py           FastAPI routes
+│   ├── dashboard.html   self-contained stakeholder dashboard (served at /)
 │   ├── service.py       policy check -> validation -> typed matrix -> runner -> response
 │   ├── validation.py    JSON Schema validation, finite numbers, out-of-range warnings
 │   ├── policy.py        per-use-case data-protection rules
@@ -101,6 +116,27 @@ usecases/<id>/manifest.json   configuration only (enforced by tests)
 Adding a different model technology means writing one `ModelRunner` adapter and
 registering it in `bootstrap.RUNNERS`. The core does not change.
 
+## Dashboard
+
+`http://localhost:8000/` opens a dashboard for stakeholders: plain language, few numbers, and
+technical terms only as small print. It is one self-contained HTML file in the core (no CDN), so it
+also works in the offline container, and it adapts to every use case from the API alone:
+
+- a one-sentence summary per use case (e.g. "of every 10 real machine failures, the model spots about 6")
+  and three headline figures;
+- predictions vs. what really happened (forecasts), caught / missed / false alarms (yes-no outcomes),
+  or "random checks vs. the model" (anomaly detection);
+- why this model was chosen (simple vs. advanced model), what matters most, and the privacy rules;
+- **Try it yourself**: sliders for every input and an instant answer. The raw request and response
+  JSON are under "Technical details", including the refusal when private data is sent.
+
+For the in-depth version of the same story, see the technical notebook below.
+
+The charts use a small sample that `predictor train` stores in `descriptor.json`. For use cases
+with personal data only aggregates are stored, unless the manifest sets
+`policy.publish_evaluation_rows: true` (e.g. for synthetic or public data). Models trained before this
+existed still work; retrain them to see the charts.
+
 ## API
 
 | Method | Path | Purpose |
@@ -108,8 +144,10 @@ registering it in `bootstrap.RUNNERS`. The core does not change.
 | GET | `/health` | liveness + number of ready use cases |
 | GET | `/use-cases` | all use cases with status (`ready` / `not_trained`) |
 | GET | `/models/{id}` | metadata: inputs, kinds, units, training ranges, metrics, policy, JSON Schema |
+| GET | `/models/{id}/evaluation` | model comparison, feature importance and a test-set sample for charts |
 | POST | `/models/{id}/predict` | JSON, up to 10,000 records, all-or-nothing |
 | POST | `/models/{id}/predict/batch` | JSONL in, JSONL out, unlimited size, errors per line |
+| GET | `/` | dashboard (redirects to `/dashboard`) |
 | GET | `/metrics` | per use case: requests, predicted/rejected records, warnings, latency |
 
 ```bash

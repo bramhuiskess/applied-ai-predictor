@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prediction Dashboard</title>
+<!-- Self-contained on purpose: no CDN, so it works in the offline container.
+     Written for stakeholders; notebooks/model_internals.ipynb is the in-depth technical version. -->
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1b2230; --muted: #667085; --line: #e3e6eb; --soft: #f0f2f5;
+    --accent: #2563eb; --accent-soft: #e8effd; --actual: #1b2230; --ref: #a3acb9;
+    --good: #067647; --good-soft: #dcfae6; --bad: #c4320a; --bad-soft: #fee4e2;
+    --warn: #93370d; --warn-soft: #fef0c7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { background: var(--card); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1160px; margin: 0 auto; padding: 14px 20px; display: flex; align-items: center; gap: 16px; }
+  .brand { font-weight: 700; font-size: 17px; }
+  .brand span { color: var(--muted); font-weight: 400; }
+  .spacer { flex: 1; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+          background: var(--soft); color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .pill.ok { background: var(--good-soft); color: var(--good); }
+  .pill.err { background: var(--bad-soft); color: var(--bad); }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .devlink { font-size: 13px; color: var(--muted); }
+  nav { max-width: 1160px; margin: 0 auto; padding: 0 20px; display: flex; gap: 4px; overflow-x: auto; }
+  nav a { padding: 10px 14px; border-bottom: 2px solid transparent; color: var(--muted); white-space: nowrap; }
+  nav a:hover { color: var(--ink); text-decoration: none; }
+  nav a.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  nav a.disabled { opacity: .55; }
+  main { max-width: 1160px; margin: 0 auto; padding: 26px 20px 40px; }
+  h1 { font-size: 28px; margin: 0 0 2px; }
+  h2 { font-size: 17px; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 10px; max-width: 760px; font-size: 16px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .caption { color: var(--muted); font-size: 14px; margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; min-width: 0; }
+  .headline { margin: 20px 0 16px; padding: 18px 22px; border-radius: 14px; background: var(--accent-soft);
+              font-size: 19px; line-height: 1.45; border: 1px solid #cfdcfb; }
+  .headline b { color: var(--accent); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kpi .value { font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .kpi .value small { font-size: 16px; color: var(--muted); font-weight: 500; }
+  .kpi .label { font-size: 14px; font-weight: 600; }
+  .kpi .hint { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .grid.even { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .grid, .grid.even, .try { grid-template-columns: 1fr !important; } }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+  .legend i.dash { background: repeating-linear-gradient(90deg, var(--ref) 0 4px, transparent 4px 7px) !important; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { fill: var(--muted); font-size: 11px; }
+  .hbars { display: grid; gap: 14px; }
+  .hbar .row { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; margin-bottom: 4px; }
+  .hbar .row b { font-variant-numeric: tabular-nums; }
+  .hbar .track { height: 12px; background: var(--soft); border-radius: 6px; overflow: hidden; }
+  .hbar .fill { height: 100%; background: #9db7f5; border-radius: 6px; transition: width .25s; }
+  .hbar.chosen .fill { background: var(--accent); }
+  .hbar.ref .fill { background: var(--ref); }
+  .hbar.chosen .row span { font-weight: 600; }
+  .verdict { margin: 16px 0 0; padding: 10px 12px; background: var(--soft); border-radius: 8px; font-size: 14px; }
+  .outcomes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .outcome { border-radius: 12px; padding: 14px 16px; }
+  .outcome .n { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .outcome .t { font-weight: 600; }
+  .outcome .d { font-size: 13px; opacity: .85; }
+  .outcome.good { background: var(--good-soft); color: var(--good); }
+  .outcome.bad { background: var(--bad-soft); color: var(--bad); }
+  .outcome.warn { background: var(--warn-soft); color: var(--warn); }
+  .outcome.neutral { background: var(--soft); color: var(--ink); }
+  .notice { background: var(--soft); border-radius: 10px; padding: 16px; color: var(--muted); font-size: 14px; }
+  .steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; font-size: 14px; }
+  .try { display: grid; grid-template-columns: minmax(280px, 1fr) 1.2fr; gap: 28px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+  button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); cursor: pointer; }
+  button:hover { background: var(--soft); }
+  button.danger { color: var(--bad); border-color: #fecdca; }
+  .field { margin-bottom: 14px; }
+  .field label { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .field label span { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .field .inputs { display: flex; gap: 10px; align-items: center; }
+  .field input[type=range] { flex: 1; accent-color: var(--accent); min-width: 0; }
+  .field input[type=number], .field select { width: 96px; font: inherit; font-size: 14px; padding: 5px 8px;
+           border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+  .field select { width: 100%; }
+  .switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .switch button { border: 0; border-radius: 0; padding: 5px 18px; }
+  .switch button.on { background: var(--accent); color: #fff; }
+  .result { min-width: 0; }
+  .visual { background: var(--soft); border-radius: 12px; padding: 22px; margin-bottom: 14px; min-height: 150px; }
+  .big { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; margin: 4px 0; }
+  .big small { font-size: 20px; color: var(--muted); font-weight: 500; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .badge { display: inline-block; padding: 4px 14px; border-radius: 999px; font-weight: 700; font-size: 18px; }
+  .badge.good { background: var(--good-soft); color: var(--good); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+  .badge.bad { background: var(--bad-soft); color: var(--bad); }
+  .msgs { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+  .msgs li { padding: 9px 11px; border-radius: 8px; font-size: 14px; }
+  .msgs li.warn { background: var(--warn-soft); color: var(--warn); }
+  .msgs li.err { background: var(--bad-soft); color: var(--bad); }
+  details.tech { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
+  details.tech summary { cursor: pointer; font-size: 14px; color: var(--muted); }
+  details.tech[open] summary { margin-bottom: 10px; }
+  .json { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .json h3 { font-size: 12px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  @media (max-width: 1100px) { .json { grid-template-columns: 1fr; } }
+  pre { margin: 0; background: #0f1623; color: #d6deeb; border-radius: 8px; padding: 12px; font-size: 12px;
+        line-height: 1.5; overflow: auto; max-height: 320px; }
+  .scale { position: relative; height: 12px; border-radius: 6px; margin: 22px 0 24px; }
+  .scale .mark { position: absolute; top: -6px; width: 4px; height: 24px; margin-left: -2px; background: var(--ink); border-radius: 2px; transition: left .25s; }
+  .scale .tick { position: absolute; top: 16px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .scale .tick.l { left: 0; } .scale .tick.r { right: 0; }
+  ul.rules { margin: 0; padding-left: 20px; display: grid; gap: 8px; font-size: 14px; }
+  ul.rules li::marker { color: var(--accent); }
+  .tag { display: inline-block; background: var(--bad-soft); color: var(--bad); font-size: 12px; padding: 1px 8px; border-radius: 999px; margin: 2px 4px 0 0; }
+  footer { max-width: 1160px; margin: 0 auto; padding: 0 20px 32px; color: var(--muted); font-size: 13px; }
+  code { font-size: 12.5px; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+  #tooltip { position: fixed; pointer-events: none; background: #0f1623; color: #fff; font-size: 12px; padding: 6px 9px;
+             border-radius: 6px; opacity: 0; transition: opacity .1s; z-index: 10; white-space: nowrap; }
+  #tooltip b { display: block; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">Applied AI <span>· prediction dashboard</span></div>
+    <div class="spacer"></div>
+    <span id="health" class="pill"><span class="dot"></span>connecting…</span>
+    <a class="devlink" href="/docs">For developers: API docs</a>
+  </div>
+  <nav id="tabs"></nav>
+</header>
+<main id="main"></main>
+<footer>
+  This dashboard is the short version. For how the models work in depth (data preparation, model choice,
+  export and checks), see the notebook <code>prototype/notebooks/model_internals.ipynb</code>.
+</footer>
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const state = { useCases: [], meta: null, evaluation: null, values: {}, seq: 0, timer: null };
+
+const TASKS = { regression: "Predicts a number", classification: "Predicts an outcome", anomaly: "Spots unusual cases" };
+
+// ------------------------------------------------------------------ wording helpers
+
+// Column names are written for machines (inside_temp_c); show them as words (Inside temp).
+const UNIT_SUFFIXES = new Set(["c", "k", "pct", "rpm", "nm", "min", "wm2", "ppm", "mm", "s", "bar", "kg"]);
+const SPECIAL_WORDS = { co2: "CO₂", id: "ID", avg: "Average" };
+function pretty(name) {
+  const parts = String(name).split(/[_\-\s]+/).filter(Boolean);
+  while (parts.length > 1 && UNIT_SUFFIXES.has(parts.at(-1).toLowerCase())) parts.pop();
+  const text = parts.map(p => SPECIAL_WORDS[p.toLowerCase()] || p).join(" ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+const targetBase = name => (name || "").replace(/ \(\+\d+ steps\)$/, "");
+const unitText = unit => unit === "%" ? " percentage points" : unit ? " " + unit : "";
+
+function fmt(v, digits = 2) {
+  if (v == null || Number.isNaN(v)) return "–";
+  if (Number.isInteger(v)) return v.toLocaleString("en");
+  const a = Math.abs(v);
+  if (a >= 1000) return v.toLocaleString("en", { maximumFractionDigits: 0 });
+  if (a >= 100) return v.toFixed(1);
+  return v.toFixed(digits);
+}
+const tick = v => String(+v.toFixed(6));
+const pct = (v, d = 0) => v == null ? "–" : (v * 100).toFixed(d) + "%";
+const chance = v => v < 0.01 ? "<1%" : v > 0.99 ? ">99%" : pct(v);
+const outOf10 = v => Math.max(0, Math.min(10, Math.round(v * 10)));
+
+// "+6 steps" becomes "in 1 hour" when the sample has timestamps to measure a step.
+function horizonText(steps) {
+  const times = state.evaluation?.sample?.regression?.time;
+  if (!times || times.length < 2) return `${steps} steps ahead`;
+  const gaps = times.slice(1, 50).map((t, i) => new Date(t) - new Date(times[i])).sort((a, b) => a - b);
+  const minutes = gaps[Math.floor(gaps.length / 2)] / 60000 * steps;
+  if (minutes < 60) return `in ${Math.round(minutes)} minutes`;
+  if (minutes < 48 * 60) { const h = +(minutes / 60).toFixed(1); return `in ${h} hour${h === 1 ? "" : "s"}`; }
+  return `in ${Math.round(minutes / 1440)} days`;
+}
+function horizonOf(targetName) {
+  const match = /^(\S+) \(\+(\d+) steps\)$/.exec(targetName || "");
+  return match ? { feature: match[1], steps: Number(match[2]) } : null;
+}
+
+// Binary 0/1 targets read better as "chance of machine failure".
+function binaryPositive(ev) {
+  const classes = ev.sample?.confusion_matrix?.classes || state.meta?.classes;
+  if (!classes || classes.length !== 2) return null;
+  const yes = classes.find(c => ["1", "true", "yes"].includes(String(c).toLowerCase()));
+  return yes ? { yes, name: pretty(ev.target_name).toLowerCase() } : null;
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  let body = null;
+  try { body = await response.json(); } catch (_) { /* not JSON */ }
+  return { status: response.status, ok: response.ok, body };
+}
+
+// ------------------------------------------------------------------ startup
+
+async function init() {
+  const [health, useCases] = await Promise.all([api("/health"), api("/use-cases")]);
+  const pill = $("#health");
+  pill.className = "pill " + (health.ok ? "ok" : "err");
+  pill.innerHTML = `<span class="dot"></span>${health.ok ? `Online · ${health.body.use_cases_ready} models ready` : "Offline"}`;
+  state.useCases = useCases.body || [];
+  $("#tabs").innerHTML = state.useCases.map(uc =>
+    `<a href="#${esc(uc.use_case_id)}" data-id="${esc(uc.use_case_id)}" class="${uc.status === "ready" ? "" : "disabled"}">${esc(pretty(uc.use_case_id))}</a>`
+  ).join("");
+  window.addEventListener("hashchange", () => select(location.hash.slice(1)));
+  const first = state.useCases.find(uc => uc.status === "ready") || state.useCases[0];
+  select(location.hash.slice(1) || first?.use_case_id);
+}
+
+async function select(id) {
+  document.querySelectorAll("#tabs a").forEach(a => a.classList.toggle("active", a.dataset.id === id));
+  const uc = state.useCases.find(u => u.use_case_id === id);
+  if (!uc) { $("#main").innerHTML = `<div class="notice">There are no use cases yet.</div>`; return; }
+  if (uc.status !== "ready") {
+    $("#main").innerHTML = `<h1>${esc(pretty(id))}</h1><p class="lead">${esc(uc.description)}</p>
+      <div class="notice">This use case has not been trained yet, so there is nothing to show.
+      (Technical: run <code>predictor train ${esc(id)}</code>.)</div>`;
+    return;
+  }
+  const [meta, evaluation] = await Promise.all([api(`/models/${id}`), api(`/models/${id}/evaluation`)]);
+  state.meta = meta.body;
+  state.evaluation = evaluation.body;
+  render();
+  window.scrollTo(0, 0);
+}
+
+// ------------------------------------------------------------------ page
+
+function render() {
+  const m = state.meta, ev = state.evaluation, split = ev.split || {};
+  const rows = (split.train || 0) + (split.validation || 0) + (split.test || 0);
+  const trained = m.trained_at ? new Date(m.trained_at).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" }) : "";
+  $("#main").innerHTML = `
+    <h1>${esc(pretty(m.use_case_id))}</h1>
+    <p class="lead">${esc(m.description)}</p>
+    <div class="chips">
+      <span class="pill">${esc(TASKS[m.task_type] || m.task_type)}</span>
+      ${rows ? `<span class="pill">Learned from ${rows.toLocaleString("en")} historical records</span>` : ""}
+      ${trained ? `<span class="pill">Last trained ${esc(trained)}</span>` : ""}
+    </div>
+    <div class="headline">${headline()}</div>
+    <section class="kpis">${kpis()}</section>
+    <section class="grid">
+      <div class="card" id="performance"></div>
+      <div class="card" id="side"></div>
+    </section>
+    <section class="card" style="margin-bottom:16px">
+      <div class="try">
+        <div>
+          <div class="toolbar" id="toolbar"></div>
+          <form id="form" onsubmit="return false"></form>
+        </div>
+        <div class="result">
+          <div class="visual" id="visual"></div>
+          <details class="tech">
+            <summary>Technical details: the raw request and response (JSON) <span id="status"></span></summary>
+            <div class="json">
+              <div><h3>Request</h3><pre id="request"></pre></div>
+              <div><h3>Response</h3><pre id="response"></pre></div>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+    <section class="grid even">
+      <div class="card" id="importance"></div>
+      <div class="card" id="policy"></div>
+    </section>`;
+  renderPerformance();
+  renderSide();
+  renderImportance();
+  renderPolicy();
+  renderForm();
+}
+
+// One sentence a stakeholder can repeat after the meeting.
+function headline() {
+  const ev = state.evaluation, m = ev.metrics || {}, unit = unitText(ev.target_unit);
+  if (ev.task_type === "regression") {
+    const ref = ev.reference?.persistence_mae;
+    let text = `On average, the prediction is off by <b>${fmt(m.mae)}${esc(unit)}</b>.`;
+    if (ref != null) text += ` That is <b>${pct((ref - m.mae) / ref)} closer</b> to reality than simply assuming nothing changes.`;
+    else if (m.r2 != null) text += ` It explains about <b>${pct(m.r2)}</b> of the ups and downs in the data.`;
+    return text;
+  }
+  if (ev.task_type === "classification") {
+    const positive = binaryPositive(ev), cm = ev.sample?.confusion_matrix;
+    if (positive && cm) {
+      const [[, fp], [fn, tp]] = cm.counts;
+      return `Of every 10 real cases of ${esc(positive.name)}, the model spots about <b>${outOf10(tp / (tp + fn || 1))}</b>.
+        When it raises an alarm, it is right <b>${outOf10(tp / (tp + fp || 1))} out of 10</b> times.`;
+    }
+    return `The model picks the right outcome in <b>${pct(m.accuracy)}</b> of cases it had never seen before.`;
+  }
+  if (m.recall_vs_label != null) {
+    return `If you only inspect the <b>${pct(m.anomaly_rate)}</b> of cases the model flags, you find <b>${pct(m.recall_vs_label)}</b> of all real problems.
+      That is about <b>${(m.recall_vs_label / m.anomaly_rate).toFixed(0)}× more</b> than checking at random, and the model never needed examples of problems to learn this.`;
+  }
+  return `The model flags about <b>${pct(m.anomaly_rate)}</b> of cases as unusual and worth a closer look.`;
+}
+
+function tile(label, value, hint, color) {
+  return `<div class="card kpi"><div class="label">${label}</div>
+    <div class="value"${color ? ` style="color:${color}"` : ""}>${value}</div><div class="hint">${hint}</div></div>`;
+}
+
+function kpis() {
+  const ev = state.evaluation, m = ev.metrics || {}, unit = ev.target_unit || "";
+  const small = s => s ? `<small> ${esc(s)}</small>` : "";
+  if (ev.task_type === "regression") {
+    const ref = ev.reference?.persistence_mae;
+    return [
+      tile("Average error", fmt(m.mae) + small(unit === "%" ? "%-pt" : unit), "how far off a typical prediction is (MAE)"),
+      ref != null
+        ? tile("Better than a simple guess", pct((ref - m.mae) / ref), `the guess "it stays the same" is off by ${fmt(ref)} ${esc(unit)}`, "var(--good)")
+        : "",
+      tile("Patterns explained", pct(m.r2), "share of the ups and downs the model can explain (R²)"),
+    ].join("");
+  }
+  if (ev.task_type === "classification") {
+    const cm = ev.sample?.confusion_matrix, positive = binaryPositive(ev);
+    if (positive && cm) {
+      const [[tn, fp], [fn, tp]] = cm.counts;
+      return [
+        tile(`${esc(pretty(ev.target_name))}s caught`, pct(tp / (tp + fn || 1)), "of the real cases, how many the model spots (recall)"),
+        tile("Alarms that were right", pct(tp / (tp + fp || 1)), "when the model warns, how often it is correct (precision)"),
+        tile("Correct overall", pct(m.accuracy), `high by nature: ${pct((tn + fp) / (tn + fp + fn + tp))} of all cases are "no"`),
+      ].join("");
+    }
+    return tile("Correct overall", pct(m.accuracy), "share of cases predicted correctly");
+  }
+  return [
+    tile("Flagged for inspection", pct(m.anomaly_rate, 1), "share of cases the model marks as unusual"),
+    m.recall_vs_label != null ? tile("Real problems found", pct(m.recall_vs_label), "share of all real problems among the flagged cases") : "",
+    m.recall_vs_label != null ? tile("Better than random checks", (m.recall_vs_label / m.anomaly_rate).toFixed(1) + "×", "compared to inspecting the same number of cases at random", "var(--good)") : "",
+  ].join("");
+}
+
+function withheldOr(sample, key, render) {
+  if (!sample) return `<div class="notice">This model was trained before charts existed. Retrain it to see this chart.</div>`;
+  if (sample.samples_withheld) return `<div class="notice">This use case contains personal data, so individual results are deliberately not shown here.
+    Only the totals above are published.</div>`;
+  return sample[key] ? render(sample[key]) : `<div class="notice">No data available.</div>`;
+}
+
+function renderPerformance() {
+  const ev = state.evaluation, el = $("#performance"), unit = ev.target_unit || "";
+  if (ev.task_type === "regression") {
+    const r = ev.sample?.regression;
+    // One reading per moment (greenhouse) reads as a line over time; many groups per
+    // period (departments per month) would be a zigzag, so those get a scatter plot.
+    const series = r?.time && r.time.every((t, i) => i === 0 || t > r.time[i - 1]);
+    el.innerHTML = `<h2>Our predictions vs. what really happened</h2>
+      <p class="caption">${series ? "A few days the model had never seen while learning. Hover over the chart for details."
+        : `${r ? r.actual.length.toLocaleString("en") + " " : ""}cases the model had never seen while learning. Each dot is one case: the closer to the diagonal line, the better the prediction.`}</p>
+      <div id="chart"></div>`;
+    $("#chart", el).innerHTML = withheldOr(ev.sample, "regression", () => "");
+    if (r && !series) scatterChart($("#chart", el), { actual: r.actual, predicted: r.predicted, unit, time: r.time });
+    else if (r) lineChart($("#chart", el), {
+      time: r.time, unit,
+      series: [
+        { name: "What really happened", values: r.actual, color: "var(--actual)", width: 1.6 },
+        { name: "Our prediction", values: r.predicted, color: "var(--accent)", width: 2.2 },
+        ...(r.persistence ? [{ name: `Simple guess: "it stays the same"`, values: r.persistence, color: "var(--ref)", width: 1.2, dash: true }] : []),
+      ],
+    });
+  } else if (ev.task_type === "classification") {
+    const cm = ev.sample?.confusion_matrix;
+    const total = cm ? cm.counts.flat().reduce((a, b) => a + b, 0) : 0;
+    el.innerHTML = `<h2>What happened on ${total.toLocaleString("en")} test cases</h2>
+      <p class="caption">Cases the model had never seen while learning, sorted by what it said and what really happened.</p>
+      <div id="chart"></div>`;
+    $("#chart", el).innerHTML = withheldOr(ev.sample, "confusion_matrix", outcomes);
+  } else {
+    const m = ev.metrics || {};
+    el.innerHTML = `<h2>Finding problems with fewer checks</h2>
+      <p class="caption">Suppose you can inspect ${pct(m.anomaly_rate)} of all cases. How many of the real problems do you find?</p>
+      ${m.recall_vs_label == null ? `<div class="notice">There is no record of real problems to compare with for this use case.</div>` :
+        hbars([
+          { label: `Inspect ${pct(m.anomaly_rate)} at random`, value: m.anomaly_rate, text: pct(m.anomaly_rate) + " of problems found", cls: "ref" },
+          { label: `Inspect the ${pct(m.anomaly_rate)} the model flags`, value: m.recall_vs_label, text: pct(m.recall_vs_label) + " of problems found", cls: "chosen" },
+        ], 1)}`;
+  }
+}
+
+function renderSide() {
+  const ev = state.evaluation, el = $("#side"), unit = ev.target_unit === "%" ? " %-pt" : unitText(ev.target_unit);
+  if (ev.task_type === "anomaly") {
+    el.innerHTML = `<h2>How does it work?</h2>
+      <ol class="steps">
+        <li>The model studies thousands of ordinary records and learns what <b>normal</b> looks like.</li>
+        <li>New records that do not fit that picture get a low score and are <b>flagged</b>.</li>
+        <li>No examples of failures are needed, so this works from day one. Once real failures are recorded,
+            a model that learns from them directly does even better.</li>
+      </ol>`;
+    return;
+  }
+  const regression = ev.task_type === "regression";
+  const metric = regression ? "mae" : "f1";
+  const names = { linear_regression: "Simple model", logistic_regression: "Simple model", lightgbm: "Advanced model (LightGBM)" };
+  const items = Object.entries(ev.candidates || {}).map(([name, r]) => ({
+    label: names[name] || pretty(name), value: r.test[metric],
+    text: regression ? `off by ${fmt(r.test[metric])}${unit}` : `score ${fmt(r.test[metric])}`,
+    cls: name === ev.algorithm ? "chosen" : "",
+  }));
+  if (ev.reference?.persistence_mae != null) {
+    items.push({ label: `Simple guess: "it stays the same"`, value: ev.reference.persistence_mae, text: `off by ${fmt(ev.reference.persistence_mae)}${unit}`, cls: "ref" });
+  }
+  const simpleWon = !String(ev.algorithm).includes("lightgbm");
+  el.innerHTML = `<h2>Why this model?</h2>
+    <p class="caption">We let a simple and an advanced model compete. The system automatically keeps the one that does best
+      (${regression ? "smallest error" : "highest F1 score"}; the winner is blue).</p>
+    ${hbars(items, Math.max(...items.map(i => i.value)) * 1.05)}
+    <p class="verdict">${simpleWon
+      ? "Here the <b>simple model</b> wins: the advanced model adds nothing for this data, so we keep the easier one."
+      : "Here the <b>advanced model</b> wins clearly: it picks up patterns the simple model misses."}</p>`;
+}
+
+function renderImportance() {
+  const fi = state.evaluation.feature_importance;
+  const el = $("#importance");
+  if (!fi) {  // e.g. Isolation Forest: it judges all inputs together, so there is nothing to rank
+    el.parentElement.style.gridTemplateColumns = "1fr";
+    el.remove();
+    return;
+  }
+  const items = Object.entries(fi).slice(0, 5).map(([name, v]) => ({ label: pretty(name), value: v, text: pct(v) }));
+  el.innerHTML = `<h2>What matters most</h2>
+    <p class="caption">How much each piece of information influences the prediction (top ${items.length}).</p>
+    ${hbars(items, items[0].value, "chosen")}`;
+}
+
+function renderPolicy() {
+  const p = state.meta.policy;
+  const rules = [];
+  rules.push(p.contains_personal_data
+    ? `Contains personal data${p.special_category_data ? " (including health-related data)" : ""}, so the strictest rules apply.`
+    : "Contains no personal data.");
+  if (p.forbidden_fields.length) rules.push(`These fields are always refused: ${p.forbidden_fields.map(f => `<span class="tag">${esc(f)}</span>`).join("")}`);
+  if (p.min_group_size) rules.push(`Groups smaller than ${p.min_group_size.min} people are refused, so no individual can be singled out.`);
+  rules.push(p.log_feature_values ? "Input values may be logged for troubleshooting." : "Input values are never written to logs.");
+  if (p.reject_unknown_fields) rules.push("Unexpected or misspelled information is refused instead of silently ignored.");
+  $("#policy").innerHTML = `<h2>Privacy and safety rules</h2>
+    <p class="caption">Set per use case and checked on every single request.</p>
+    <ul class="rules">${rules.map(text => `<li>${text}</li>`).join("")}</ul>`;
+}
+
+function typicalValues() {
+  const example = state.evaluation.sample?.example_input || {};
+  const values = {};
+  for (const input of state.meta.inputs) {
+    if (input.name in example) values[input.name] = example[input.name];
+    else if (input.allowed_values) values[input.name] = input.allowed_values[0];
+    else { const [lo, hi] = input.training_range; values[input.name] = input.kind === "integer" ? Math.round((lo + hi) / 2) : +((lo + hi) / 2).toFixed(3); }
+  }
+  return values;
+}
+
+function stepFor(input) {
+  if (input.kind === "integer") return 1;
+  const [lo, hi] = input.training_range, raw = (hi - lo) / 200;
+  const pow = 10 ** Math.floor(Math.log10(raw || 1));
+  return [1, 2, 5, 10].map(f => f * pow).find(s => s >= raw) || pow;
+}
+
+function renderForm() {
+  state.values = typicalValues();
+  const policy = state.meta.policy;
+  $("#toolbar").innerHTML = `<button type="button" id="reset">Back to a typical case</button>` +
+    (policy.forbidden_fields.length ? `<button type="button" class="danger" id="forbidden">Try sending private data (“${esc(policy.forbidden_fields[0])}”)</button>` : "");
+  $("#reset").onclick = renderForm;
+  if ($("#forbidden")) $("#forbidden").onclick = () => predict({ [policy.forbidden_fields[0]]: "example" });
+
+  $("#form").innerHTML = state.meta.inputs.map((input, i) => {
+    const value = state.values[input.name], unit = input.unit ? ` (${esc(input.unit)})` : "";
+    let control;
+    if (input.kind === "categorical") {
+      control = `<select data-i="${i}">${input.allowed_values.map(v => `<option${v === value ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+    } else if (input.kind === "binary") {
+      control = `<div class="switch" data-i="${i}">${[0, 1].map(v => `<button type="button" data-v="${v}" class="${v === value ? "on" : ""}">${v ? "Yes" : "No"}</button>`).join("")}</div>`;
+    } else {
+      const [lo, hi] = input.training_range;
+      control = `<input type="range" data-i="${i}" min="${lo}" max="${hi}" step="${stepFor(input)}" value="${value}">
+                 <input type="number" data-i="${i}" step="any" value="${value}">`;
+    }
+    const range = input.training_range ? `<span>usual: ${tick(input.training_range[0])} – ${tick(input.training_range[1])}</span>` : "";
+    return `<div class="field"><label title="${esc(input.name)}">${esc(pretty(input.name))}${unit}${range}</label><div class="inputs">${control}</div></div>`;
+  }).join("");
+
+  $("#form").oninput = $("#form").onchange = e => {
+    const input = state.meta.inputs[e.target.dataset.i];
+    if (!input) return;
+    if (e.target.tagName === "SELECT") state.values[input.name] = e.target.value;
+    else {
+      const raw = e.target.value, value = raw === "" ? null : Number(raw);
+      state.values[input.name] = value;
+      const twin = e.target.type === "range" ? "number" : "range";
+      const other = $(`input[type=${twin}][data-i="${e.target.dataset.i}"]`);
+      if (other && value != null) other.value = value;
+    }
+    schedule();
+  };
+  $("#form").onclick = e => {
+    const button = e.target.closest(".switch button");
+    if (!button) return;
+    const sw = button.parentElement, input = state.meta.inputs[sw.dataset.i];
+    state.values[input.name] = Number(button.dataset.v);
+    sw.querySelectorAll("button").forEach(b => b.classList.toggle("on", b === button));
+    schedule();
+  };
+  predict();
+}
+
+function schedule() { clearTimeout(state.timer); state.timer = setTimeout(predict, 120); }
+
+async function predict(extra) {
+  const id = state.meta.use_case_id, seq = ++state.seq;
+  const body = { records: [{ record_id: "dashboard", features: { ...state.values, ...(extra || {}) } }] };
+  $("#request").textContent = `POST /models/${id}/predict\n\n` + JSON.stringify(body, null, 2);
+  const result = await api(`/models/${id}/predict`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (seq !== state.seq || id !== state.meta.use_case_id) return;
+  $("#status").innerHTML = `<span class="pill ${result.ok ? "ok" : "err"}">${result.status}${result.ok ? " OK" : " refused"}</span>`;
+  $("#response").textContent = JSON.stringify(result.body, null, 2);
+  renderVisual(result);
+}
+
+function friendlyWarning(text) {
+  const match = /^(\S+)=(\S+) is outside the training range \[(\S+), (\S+)\]/.exec(text);
+  return match
+    ? `${esc(pretty(match[1]))} (${esc(match[2])}) is outside the values the model learned from (${esc(match[3])} – ${esc(match[4])}). Treat this answer with care.`
+    : esc(text);
+}
+
+function renderVisual(result) {
+  const el = $("#visual");
+  if (!result.ok) {
+    const errors = result.body?.errors || [{ field: "request", message: JSON.stringify(result.body?.detail) }];
+    el.innerHTML = `<span class="badge bad">Refused</span>
+      <p class="sub">The system refuses unsafe or invalid input and says exactly why, instead of giving an unreliable answer.</p>
+      <ul class="msgs">${errors.map(e => `<li class="err"><b>${esc(pretty(e.field))}</b>: ${esc(e.message)}</li>`).join("")}</ul>`;
+    return;
+  }
+  const body = result.body, p = body.predictions[0], ev = state.evaluation;
+  let html = "";
+  if (body.task_type === "regression") {
+    const unit = body.target_unit || "", horizon = horizonOf(body.target_name);
+    const when = horizon ? ` ${horizonText(horizon.steps)}` : "";
+    html = `<div class="sub">Expected ${esc(pretty(targetBase(body.target_name)).toLowerCase())}${esc(when)}</div>
+      <div class="big">${fmt(p.prediction)}<small> ${esc(unit)}</small></div>`;
+    const now = horizon ? state.values[horizon.feature] : null;
+    if (now != null) {
+      const delta = p.prediction - now;
+      html += `<div class="sub">Now ${fmt(now)} ${esc(unit)}, so ${Math.abs(delta) < 0.05 ? "about the same" : `${delta > 0 ? "▲ rising" : "▼ falling"} by ${fmt(Math.abs(delta))} ${esc(unit)}`}</div>`;
+    }
+  } else if (body.task_type === "classification") {
+    const positive = binaryPositive(ev);
+    if (positive) {
+      const probability = p.probabilities[positive.yes];
+      const [cls, label] = probability >= 0.5 ? ["bad", "High risk"] : probability >= 0.2 ? ["warn", "Elevated risk"] : ["good", "Low risk"];
+      html = `<span class="badge ${cls}">${label}</span>
+        <div class="big">${chance(probability)}<small> chance of ${esc(positive.name)}</small></div>
+        ${meter(probability, "linear-gradient(90deg, #dcfae6, #fef0c7 35%, #fda29b)", "unlikely", "very likely")}`;
+    } else {
+      html = `<div class="sub">Most likely outcome</div><div class="big">${esc(p.prediction)}</div>
+        ${hbars(Object.entries(p.probabilities).map(([c, v]) => ({ label: c, value: v, text: pct(v), cls: c === p.prediction ? "chosen" : "" })), 1)}`;
+    }
+  } else {
+    const scores = ev.sample?.anomaly?.scores || [-0.2, 0.2];
+    const lo = Math.min(...scores, p.anomaly_score), hi = Math.max(...scores, p.anomaly_score);
+    const anomaly = p.prediction === "anomaly";
+    html = `<span class="badge ${anomaly ? "bad" : "good"}">${anomaly ? "Unusual: worth inspecting" : "Looks normal"}</span>
+      <p class="sub" style="margin:10px 0 0">${anomaly ? "This combination of values does not match what the model usually sees." : "This combination of values is in line with normal operation."}</p>
+      ${meter((p.anomaly_score - lo) / ((hi - lo) || 1), "linear-gradient(90deg, #fda29b, #fef0c7 40%, #dcfae6)", "very unusual", "very typical")}`;
+  }
+  if (p.warnings.length) html += `<ul class="msgs">${p.warnings.map(w => `<li class="warn"><b>Note:</b> ${friendlyWarning(w)}</li>`).join("")}</ul>`;
+  el.innerHTML = html;
+}
+
+function meter(position, background, left, right) {
+  const at = Math.max(0, Math.min(100, position * 100));
+  return `<div class="scale" style="background:${background}">
+    <div class="mark" style="left:${at}%"></div>
+    <div class="tick l">${esc(left)}</div><div class="tick r">${esc(right)}</div>
+  </div>`;
+}
+
+// ------------------------------------------------------------------ charts
+
+function hbars(items, max, cls = "") {
+  return `<div class="hbars">${items.map(i => `
+    <div class="hbar ${i.cls ?? cls}">
+      <div class="row"><span>${esc(i.label)}</span><b>${i.text}</b></div>
+      <div class="track"><div class="fill" style="width:${Math.max(0.5, i.value / (max || 1) * 100)}%"></div></div>
+    </div>`).join("")}</div>`;
+}
+
+function outcomes(cm) {
+  const positive = binaryPositive(state.evaluation);
+  if (!positive) {  // more than two outcomes: a plain table of counts
+    return `<table>${cm.counts.map((row, r) => `<tr><th>${esc(cm.classes[r])}</th>${row.map(n => `<td>${n}</td>`).join("")}</tr>`).join("")}</table>`;
+  }
+  const [[tn, fp], [fn, tp]] = cm.counts, n = v => v.toLocaleString("en");
+  const what = esc(positive.name);
+  return `<div class="outcomes">
+    <div class="outcome good"><div class="n">${n(tp)}</div><div class="t">Caught</div><div class="d">real ${what}, and the model warned</div></div>
+    <div class="outcome bad"><div class="n">${n(fn)}</div><div class="t">Missed</div><div class="d">real ${what}, but no warning</div></div>
+    <div class="outcome warn"><div class="n">${n(fp)}</div><div class="t">False alarm</div><div class="d">a warning, but nothing was wrong</div></div>
+    <div class="outcome neutral"><div class="n">${n(tn)}</div><div class="t">Correctly calm</div><div class="d">nothing wrong, and no warning</div></div>
+  </div>`;
+}
+
+function niceTicks(lo, hi, count) {
+  const raw = (hi - lo) / count, pow = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map(f => f * pow).find(s => s >= raw);
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) ticks.push(+v.toFixed(10));
+  return ticks;
+}
+
+const tooltip = $("#tooltip");
+function showTip(e, html) {
+  tooltip.innerHTML = html;
+  tooltip.style.opacity = 1;
+  const x = e.clientX + 14, w = tooltip.offsetWidth;
+  tooltip.style.left = (x + w > innerWidth - 8 ? e.clientX - w - 14 : x) + "px";
+  tooltip.style.top = e.clientY + 14 + "px";
+}
+const hideTip = () => { tooltip.style.opacity = 0; };
+
+function scatterChart(el, { actual, predicted, unit, time }) {
+  const W = 720, H = 330, m = { l: 46, r: 10, t: 10, b: 40 };
+  let lo = Math.min(...actual, ...predicted), hi = Math.max(...actual, ...predicted);
+  const pad = (hi - lo) * 0.05 || 1; lo -= pad; hi += pad;
+  const sx = v => m.l + (v - lo) / (hi - lo) * (W - m.l - m.r);
+  const sy = v => m.t + (hi - v) / (hi - lo) * (H - m.t - m.b);
+  const u = unit ? ` ${unit}` : "";
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Predicted versus actual values">`;
+  for (const t of niceTicks(lo, hi, 6)) {
+    svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${sy(t)}" y2="${sy(t)}" stroke="var(--line)"/>
+            <text x="${m.l - 6}" y="${sy(t) + 4}" text-anchor="end">${tick(t)}</text>
+            <text x="${sx(t)}" y="${H - m.b + 16}" text-anchor="middle">${tick(t)}</text>`;
+  }
+  svg += `<line x1="${sx(lo)}" y1="${sy(lo)}" x2="${sx(hi)}" y2="${sy(hi)}" stroke="var(--ref)" stroke-width="1.5" stroke-dasharray="5 4"/>
+          <text x="${sx(hi) - 4}" y="${sy(hi) + 14}" text-anchor="end">perfect prediction</text>
+          <text x="${(m.l + W - m.r) / 2}" y="${H - 4}" text-anchor="middle">what really happened${esc(u)}</text>
+          <text x="${m.l + 6}" y="${m.t + 10}">predicted${esc(u)}</text>`;
+  actual.forEach((a, i) => {
+    const when = time ? new Date(time[i]).toLocaleDateString("en-GB", { month: "long", year: "numeric" }) + ": " : "";
+    svg += `<circle cx="${sx(a).toFixed(1)}" cy="${sy(predicted[i]).toFixed(1)}" r="4" fill="var(--accent)" fill-opacity=".45">
+      <title>${esc(when)}actual ${fmt(a)}${esc(u)}, predicted ${fmt(predicted[i])}${esc(u)}</title></circle>`;
+  });
+  el.innerHTML = svg + `</svg>`;
+}
+
+function lineChart(el, { series, time, unit }) {
+  const W = 720, H = 290, m = { l: 46, r: 10, t: 10, b: 28 };
+  const n = series[0].values.length;
+  const all = series.flatMap(s => s.values);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = (hi - lo) * 0.06 || 1; lo -= pad; hi += pad;
+  const sx = i => m.l + i / Math.max(1, n - 1) * (W - m.l - m.r);
+  const sy = v => m.t + (hi - v) / (hi - lo) * (H - m.t - m.b);
+  const dates = time ? time.map(t => new Date(t)) : null;
+  const label = i => dates
+    ? dates[i].toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+    : `case ${i + 1}`;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Predictions compared with what really happened">`;
+  for (const t of niceTicks(lo, hi, 5)) {
+    svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${sy(t)}" y2="${sy(t)}" stroke="var(--line)"/>
+            <text x="${m.l - 6}" y="${sy(t) + 4}" text-anchor="end">${tick(t)}</text>`;
+  }
+  svg += `<text x="${m.l - 6}" y="${m.t}" text-anchor="end" dy="-2">${esc(unit)}</text>`;
+  for (let k = 0; k < 5; k++) {
+    const i = Math.round(k / 4 * (n - 1));
+    const short = dates ? dates[i].toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" }) : String(i + 1);
+    svg += `<text x="${sx(i)}" y="${H - 8}" text-anchor="${k === 0 ? "start" : k === 4 ? "end" : "middle"}">${esc(short)}</text>`;
+  }
+  for (const s of series) {
+    const d = s.values.map((v, i) => `${i ? "L" : "M"}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`).join("");
+    svg += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.width}" stroke-linejoin="round" ${s.dash ? `stroke-dasharray="4 3"` : ""}/>`;
+  }
+  svg += `<line id="hover" y1="${m.t}" y2="${H - m.b}" stroke="var(--muted)" stroke-width="1" opacity="0"/>
+          <rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/></svg>`;
+  el.innerHTML = `<div class="legend">${series.map(s => `<span><i class="${s.dash ? "dash" : ""}" style="background:${s.color}"></i>${esc(s.name)}</span>`).join("")}</div>` + svg;
+
+  const node = $("svg", el), hover = $("#hover", el);
+  node.addEventListener("mousemove", e => {
+    const box = node.getBoundingClientRect(), x = (e.clientX - box.left) / box.width * W;
+    const i = Math.max(0, Math.min(n - 1, Math.round((x - m.l) / (W - m.l - m.r) * (n - 1))));
+    hover.setAttribute("x1", sx(i)); hover.setAttribute("x2", sx(i)); hover.setAttribute("opacity", 1);
+    showTip(e, `<b>${esc(label(i))}</b>${series.map(s => `${esc(s.name)}: ${fmt(s.values[i])} ${esc(unit)}`).join("<br>")}`);
+  });
+  node.addEventListener("mouseleave", () => { hover.setAttribute("opacity", 0); hideTip(); });
+}
+
+init().catch(err => {
+  $("#main").innerHTML = `<div class="notice">The prediction service cannot be reached right now (${esc(err.message)}).</div>`;
+});
+</script>
+</body>
+</html>

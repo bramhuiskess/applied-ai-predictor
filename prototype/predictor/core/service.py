@@ -125,6 +125,25 @@ class PredictionService:
             "feature_schema": schema,
         }
 
+    def evaluation(self, use_case_id: str) -> dict[str, Any]:
+        """How the model was chosen and how it does on the test split (for the dashboard)."""
+        uc = self._ready(use_case_id)
+        descriptor = uc.model.descriptor
+        return {
+            "use_case_id": use_case_id,
+            "model_version": uc.model.version,
+            "task_type": descriptor["task_type"],
+            "algorithm": descriptor["algorithm"],
+            "target_name": descriptor.get("target_name"),
+            "target_unit": descriptor.get("target_unit"),
+            "metrics": descriptor.get("metrics"),
+            "candidates": descriptor.get("candidates"),
+            "reference": descriptor.get("reference"),
+            "feature_importance": descriptor.get("feature_importance"),
+            "split": descriptor.get("split"),
+            "sample": descriptor.get("evaluation"),
+        }
+
     # -------------------------------------------------------------- prediction
 
     def predict(self, use_case_id: str, records: list[dict[str, Any]]) -> dict[str, Any]:

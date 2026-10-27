@@ -159,6 +159,33 @@ def test_batch_handles_more_records_than_one_chunk(client):
     assert all("prediction" in o for o in out)
 
 
+def test_dashboard_is_served_without_external_resources(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Prediction Dashboard" in response.text
+    assert "https://" not in response.text  # must work in the offline container
+
+
+def test_evaluation_for_charts(client):
+    regression = client.get("/models/greenhouse-climate/evaluation").json()
+    sample = regression["sample"]["regression"]
+    assert len(sample["actual"]) == len(sample["predicted"]) == len(sample["persistence"]) == len(sample["time"])
+    assert set(regression["sample"]["example_input"]) == set(GREENHOUSE)
+
+    matrix = client.get("/models/pump-failure/evaluation").json()["sample"]["confusion_matrix"]
+    assert matrix["classes"] == ["0", "1"] and len(matrix["counts"]) == 2
+
+    anomaly = client.get("/models/pump-anomaly/evaluation").json()["sample"]["anomaly"]
+    assert len(anomaly["scores"]) == len(anomaly["label"])
+
+
+def test_evaluation_withholds_rows_for_personal_data(client):
+    body = client.get("/models/absence-forecast/evaluation").json()
+    assert body["sample"]["samples_withheld"]
+    assert "regression" not in body["sample"]
+    assert body["metrics"]["mae"] > 0  # aggregates are still shown
+
+
 def test_metrics_and_health(client):
     predict(client, "pump-failure", PUMP)
     metrics = client.get("/metrics").json()

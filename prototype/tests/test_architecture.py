@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from predictor import bootstrap
-from predictor.core.manifest import ManifestError, load_manifest
+from predictor.core.manifest import ManifestError, Policy, load_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "predictor" / "core"
@@ -74,6 +74,12 @@ VALID = {"manifest_version": "1.0", "use_case_id": "demo", "data_source": {"adap
 def test_invalid_manifests_fail_fast(tmp_path, change, message):
     with pytest.raises(ManifestError, match=message):
         load_manifest(_write(tmp_path, {**VALID, **change}))
+
+
+def test_row_level_results_are_withheld_for_personal_data_by_default():
+    assert Policy().evaluation_rows_allowed
+    assert not Policy(contains_personal_data=True).evaluation_rows_allowed
+    assert Policy(contains_personal_data=True, publish_evaluation_rows=True).evaluation_rows_allowed
 
 
 def test_manifest_must_live_in_a_directory_with_its_id(tmp_path):

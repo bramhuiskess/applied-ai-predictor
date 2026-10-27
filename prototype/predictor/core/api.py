@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+from importlib.resources import files
 from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from predictor.core.service import (
@@ -22,6 +23,7 @@ from predictor.core.service import (
 
 MAX_RECORDS_PER_REQUEST = 10_000
 SPOOL_BYTES = 8 * 1024 * 1024
+DASHBOARD_HTML = files("predictor.core").joinpath("dashboard.html").read_text(encoding="utf-8")
 
 
 class Record(BaseModel):
@@ -70,9 +72,21 @@ def create_app(service: PredictionService) -> FastAPI:
     def list_use_cases() -> list[dict[str, Any]]:
         return service.list_use_cases()
 
+    @app.get("/", include_in_schema=False)
+    def root() -> RedirectResponse:
+        return RedirectResponse("/dashboard")
+
+    @app.get("/dashboard", include_in_schema=False)
+    def dashboard() -> HTMLResponse:
+        return HTMLResponse(DASHBOARD_HTML)
+
     @app.get("/models/{use_case_id}")
     def describe(use_case_id: str) -> dict[str, Any]:
         return service.describe(use_case_id)
+
+    @app.get("/models/{use_case_id}/evaluation")
+    def evaluation(use_case_id: str) -> dict[str, Any]:
+        return service.evaluation(use_case_id)
 
     @app.post("/models/{use_case_id}/predict")
     def predict(use_case_id: str, body: PredictRequest) -> dict[str, Any]:

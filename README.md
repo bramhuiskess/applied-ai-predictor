@@ -29,7 +29,8 @@ docker build -t applied-ai-predictor .
 docker run --rm -p 8000:8000 applied-ai-predictor
 ```
 
-Open daarna http://localhost:8000/docs, of draai `./scripts/demo.sh` voor de demo.
+Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
+http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
 Zonder Docker kan ook, zie [`prototype/README.md`](prototype/README.md).
 
@@ -39,10 +40,10 @@ Zonder Docker kan ook, zie [`prototype/README.md`](prototype/README.md).
   en afwijkingen spotten zonder labels
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
-- 52 tests, die draaien ook op GitHub Actions
+- dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
+- 56 tests, die draaien ook op GitHub Actions
 
 ## Nog te doen
 
 - tijdreeksen met historie (lags/rolling features)
 - login/auth voordat het echt online gaat
-- dashboard (nice to have)

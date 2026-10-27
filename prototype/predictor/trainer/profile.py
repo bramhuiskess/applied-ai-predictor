@@ -39,6 +39,7 @@ class PreparedData:
     persistence: pd.Series | None  # current value of the target, for horizon tasks
     chronological: bool
     notes: list[str] = field(default_factory=list)
+    times: pd.Series | None = None  # time each target value refers to (for charts)
 
 
 def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedData:
@@ -59,10 +60,11 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
     df = df.drop(columns=cfg.drop_columns)
 
     chronological = False
+    times = None
     if cfg.time_column:
         df[cfg.time_column] = pd.to_datetime(df[cfg.time_column], errors="raise")
         df = df.sort_values(cfg.time_column, kind="stable").reset_index(drop=True)
-        df = df.drop(columns=[cfg.time_column])
+        times = df.pop(cfg.time_column)
         chronological = True
 
     if policy.min_group_size:
@@ -71,6 +73,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         if too_small.any():
             notes.append(f"dropped {int(too_small.sum())} rows with {rule.field} < {rule.min} (policy)")
             df = df[~too_small].reset_index(drop=True)
+            if times is not None:
+                times = times[~too_small].reset_index(drop=True)
 
     task = cfg.task
     target_name = cfg.target
@@ -86,6 +90,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
             h = cfg.horizon_steps
             y_raw = df[cfg.target].shift(-h)
             persistence = df[cfg.target]
+            if times is not None:
+                times = times.shift(-h)  # the forecast refers to h steps later
             target_name = f"{cfg.target} (+{h} steps)"
             notes.append(f"forecasting {cfg.target} {h} steps ahead; the current value stays a feature")
         else:
@@ -97,6 +103,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         df, y_raw = df[keep].reset_index(drop=True), y_raw[keep].reset_index(drop=True)
         if persistence is not None:
             persistence = persistence[keep].reset_index(drop=True)
+        if times is not None:
+            times = times[keep].reset_index(drop=True)
     elif task == "auto":
         task = "anomaly"
         notes.append("no target given: training an anomaly detector")
@@ -128,7 +136,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
     if len(X) < 50:
         raise TrainingError(f"only {len(X)} usable rows; at least 50 are needed")
 
-    return PreparedData(X, y, specs, task, target_name, classes, evaluation_label, persistence, chronological, notes)
+    return PreparedData(X, y, specs, task, target_name, classes, evaluation_label, persistence, chronological,
+                        notes, times)
 
 
 def detect_task(target: pd.Series) -> str:

@@ -70,6 +70,15 @@ class Policy(_Strict):
     log_feature_values: bool = False
     forbidden_fields: list[str] = []
     min_group_size: MinGroupSize | None = None
+    # Row-level test results (actual vs. predicted) for the dashboard. Default: only
+    # without personal data; set true explicitly for e.g. synthetic or public data.
+    publish_evaluation_rows: bool | None = None
+
+    @property
+    def evaluation_rows_allowed(self) -> bool:
+        if self.publish_evaluation_rows is None:
+            return not self.contains_personal_data
+        return self.publish_evaluation_rows
 
     @model_validator(mode="after")
     def _special_implies_personal(self) -> Policy:

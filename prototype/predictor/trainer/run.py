@@ -19,6 +19,7 @@ from predictor.trainer.errors import TrainingError
 from predictor.trainer.profile import build_feature_schema, detect_task, prepare
 
 ARTIFACT_NAME = "model.onnx"
+EVALUATION_SAMPLES = 500
 
 
 def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path: Path | None = None) -> dict[str, Any]:
@@ -86,6 +87,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "feature_importance": models.feature_importance(chosen["model"], feature_names),
         "split": {"chronological": data.chronological, "train": len(split.train), "validation": len(split.val),
                   "test": len(split.test)},
+        "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
+                                         split.test, manifest.policy.evaluation_rows_allowed),
         "notes": data.notes,
         "dataset": {"path": str(source), "rows": int(len(df)), "sha256": _sha256(source)},
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -223,6 +226,64 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
     if d.get("notes"):
         lines += ["", "## Notes", ""] + [f"- {n}" for n in d["notes"]]
     return "\n".join(lines) + "\n"
+
+
+def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_index,
+                       rows_allowed: bool) -> dict[str, Any]:
+    """A small, chart-ready summary of how the chosen model does on the test split.
+
+    Row-level samples (actual vs. predicted, anomaly scores) are withheld unless the
+    policy allows them (by default only without personal data); aggregates such as a
+    confusion matrix are always kept.
+    """
+    X = X_test.to_numpy(dtype="float32")
+    sample: dict[str, Any] = {"example_input": _typical_input(data.features, X_train), "samples_withheld": None}
+    if data.task == "classification":
+        pred = model.predict(X)
+        n = len(data.classes)
+        matrix = [[0] * n for _ in range(n)]
+        for actual, predicted in zip(y_test, pred):
+            matrix[int(actual)][int(predicted)] += 1
+        sample["confusion_matrix"] = {"classes": data.classes, "counts": matrix}  # rows = actual
+        return sample
+    if not rows_allowed:
+        sample["samples_withheld"] = "row-level results are not published for use cases with personal data"
+        return sample
+    rows = slice(0, EVALUATION_SAMPLES)
+    if data.task == "regression":
+        sample["regression"] = {
+            "actual": [round(float(v), 4) for v in y_test.iloc[rows]],
+            "predicted": [round(float(v), 4) for v in model.predict(X[rows])],
+            "persistence": ([round(float(v), 4) for v in data.persistence.iloc[test_index[rows]]]
+                            if data.persistence is not None else None),
+            "time": ([t.isoformat() for t in data.times.iloc[test_index[rows]]]
+                     if data.times is not None else None),
+        }
+    else:
+        rows = slice(0, EVALUATION_SAMPLES * 10)  # rare labels need more rows to show a distribution
+        scores = model.decision_function(X[rows])
+        sample["anomaly"] = {
+            "scores": [round(float(s), 4) for s in scores],
+            "threshold": 0.0,  # IsolationForest: score < 0 is flagged as an anomaly
+            "label": [bool(v) for v in models._truthy(label_test.iloc[rows])] if label_test is not None else None,
+        }
+    return sample
+
+
+def _typical_input(features, X_train) -> dict[str, Any]:
+    """Median of every numeric feature and the most common value of the others."""
+    example: dict[str, Any] = {}
+    for spec in features:
+        column = X_train[spec.name].dropna()
+        if spec.kind == "categorical":
+            example[spec.name] = spec.categories[int(column.mode().iloc[0])]
+        elif spec.kind == "binary":
+            example[spec.name] = int(column.mode().iloc[0])
+        elif spec.kind == "integer":
+            example[spec.name] = int(round(float(column.median())))
+        else:
+            example[spec.name] = round(float(column.median()), 3)
+    return example
 
 
 def _leakage_suspects(data, X_train, y_train, horizon_source: str | None) -> list[str]:
