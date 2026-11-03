@@ -17,14 +17,16 @@ vond **schaalbaar** en **modulair** het belangrijkst, dus:
 
 | Map | Wat |
 |---|---|
-| [`prototype/`](prototype/) | De werkende backend (Python, FastAPI, ONNX). Daar staat ook de uitgebreide README. |
-
-Later komt er waarschijnlijk meer bij (bijv. een dashboard), dat krijgt dan een eigen map.
+| [`predictor/`](predictor/) | De backend zelf: core (API, validatie, privacy), adapters (ONNX, opslag) en de trainer |
+| [`usecases/`](usecases/) | Eén `manifest.json` per use case, verder geen code |
+| [`scripts/`](scripts/) | Datasets maken/downloaden, demo en benchmark |
+| [`tests/`](tests/) | Alle tests (draaien ook op GitHub Actions) |
+| [`notebooks/`](notebooks/) | Technische uitleg van de modellen |
+| [`docs/`](docs/) | Uitgebreide technische docs ([`technical.md`](docs/technical.md)) |
 
 ## Snel proberen
 
 ```bash
-cd prototype
 docker build -t applied-ai-predictor .
 docker run --rm -p 8000:8000 applied-ai-predictor
 ```
@@ -32,7 +34,7 @@ docker run --rm -p 8000:8000 applied-ai-predictor
 Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
 http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
-Zonder Docker kan ook, zie [`prototype/README.md`](prototype/README.md).
+Zonder Docker kan ook, zie [`docs/technical.md`](docs/technical.md).
 
 ## Wat kan het nu
 

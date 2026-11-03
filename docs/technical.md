@@ -27,7 +27,6 @@ Included use cases:
 ### Docker (recommended, runs offline)
 
 ```bash
-cd prototype
 docker build -t applied-ai-predictor .          # generates data and trains all use cases
 docker run --rm --network none applied-ai-predictor   # proof: works without any network
 docker run --rm -p 8000:8000 applied-ai-predictor     # dashboard on http://localhost:8000
@@ -40,7 +39,6 @@ contains **no pandas, scikit-learn or LightGBM**, only the ONNX runtime.
 ### Local development
 
 ```bash
-cd prototype
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[train,dev]"
 python scripts/make_datasets.py   # writes data/*.csv (downloads AI4I 2020 once)
@@ -51,7 +49,7 @@ pytest                            # 56 tests, ~30 s, fully offline
 
 ### Technical notebook
 
-[`notebooks/model_internals.ipynb`](notebooks/model_internals.ipynb) walks through the model side
+[`notebooks/model_internals.ipynb`](../notebooks/model_internals.ipynb) walks through the model side
 using the trainer's own code: profiling and the JSON Schema, chronological vs. random splits,
 baseline vs. LightGBM (and why F1), the forecast horizon and persistence baseline, Isolation
 Forest, the ONNX export with the float32 threshold bug the parity check catches, and leakage

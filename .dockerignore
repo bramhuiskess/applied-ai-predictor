@@ -4,3 +4,6 @@ models
 .pytest_cache
 *.egg-info
 .git
+.github
+docs
+notebooks
