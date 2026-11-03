@@ -8,8 +8,8 @@ used. This document grows with the scenario tickets.
 |---|---|
 | 1. Datasets for testing | done, see [datasets.md](datasets.md) |
 | 2. Scenario variables in manifest.json | done |
-| 3. Scenario input | **done** |
-| 4. Calculate a scenario | |
+| 3. Scenario input | done |
+| 4. Calculate a scenario | **done** |
 | 5. Difference base vs. scenario | |
 
 ## Scenario variables in `manifest.json` (ticket 2)
@@ -127,8 +127,61 @@ repeats the base and gives, per scenario, what changed and the complete input ro
 Every error names the scenario and the field, so a client can put the message next to the right slider.
 The endpoint only resolves and checks; ticket 4 calculates the same request with the model.
 
+## Calculating scenarios (ticket 4)
+
+Two endpoints, both on top of the scenario input of ticket 3 (same checks, same errors):
+
+| Endpoint | What it does |
+|---|---|
+| `POST /models/{id}/scenario` | the same request as `/scenario/check`; calculates the base and every scenario in one batch |
+| `POST /models/{id}/scenario/sweep` | slides one lever over a range (default: its whole range in its own step, at most 201 points) and calculates every point: a line instead of one number |
+
+```jsonc
+POST /models/nursery-gas/scenario/sweep
+{ "base": { "features": { "...": "the current batch" } }, "lever": "temp_setpoint_c", "from": 17, "to": 23, "step": 0.5 }
+
+// answer (shortened)
+{ "lever": { "name": "temp_setpoint_c", "label": "Greenhouse temperature", "training_range": [17.7, 24.3], "...": "..." },
+  "base": { "value": 19, "outputs": { "gas_m3": { "value": 25337.2 } } },
+  "points": [ { "value": 17, "outputs": { "gas_m3": { "value": 23782.0 } }, "beyond_training_data": true }, "..." ] }
+```
+
+Outputs are keyed by output name (`outputs.gas_m3.value`; classification adds `probabilities`), so the
+answer keeps its shape when a use case gets more outputs. The base of a scenario gives exactly the
+same number as `/predict` for the same input (tested).
+
+### Physical limits: `target_min` / `target_max`
+
+The first sweeps showed a model predicting **negative gas use** for a summer batch. A use case can now
+declare the limits of its output (`"target_min": 0` in the nursery manifests). Every prediction, in
+`/predict`, batches, scenarios and sweeps alike, stays within them, with a warning when the model
+went past the limit. The training metrics use the same limits, so the report matches what the API returns
+(nursery gas MAE 3,174 → 3,027 m³).
+
+### How good are the calculated scenarios? (the answer key)
+
+`python scripts/check_scenarios.py --sweeps` sweeps every lever over its whole range **through the
+real scenario engine** for 60 unseen test batches and compares each curve with the simulator's true
+curve for the same batch.
+
+| Output | Temperature | Lamp light | CO₂ | EC | Plant density |
+|---|---|---|---|---|---|
+| Weeks to harvest | **0.92** | **0.96** | **0.96** | 0.74 | **0.97** |
+| Gas | 0.68 | **0.88** | **0.81** | 0.39 | **0.83** |
+| Plants sold | 0.54 | 0.83 | 0.27 | 0.58 | **0.97** |
+
+*Correlation between the predicted and the true curve, for batches where the lever really matters
+(1 = same shape). Plants sold barely react to most levers (±0.2%), so low numbers there mean "tiny effect", not "wrong".*
+
+![Scenario sweep vs. the true curve](img/scenario_sweep.png)
+
+**Known limitation:** where a lever has no real effect (temperature in summer: the sun keeps the
+greenhouse warm anyway), the model still invents one, about a week for harvest time and 4-16% of the
+normal gas level (before the output limits this was up to 51%). The test suite guards this so it cannot get
+silently worse. Better features for the season are input for later work.
+
 ### Not in this ticket
 
 - Several outputs in one use case (the multi-output tickets): `outputs` and `effects` are already
   keyed by output name, so they work unchanged once a use case has more than one target.
-- Calculating a scenario (ticket 4), money and the difference view (ticket 5).
+- The difference between base and scenario, in money and with the margin of error (ticket 5).

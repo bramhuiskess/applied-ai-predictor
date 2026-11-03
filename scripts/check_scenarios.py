@@ -6,6 +6,10 @@ For every test batch (the ones the models never saw) and every scenario, the
 true effect comes from re-running the simulator with the same luck, and the
 predicted effect from running the trained ONNX model on the base row and on
 the changed row. This is the yardstick for the scenario tickets.
+
+`--sweeps` also runs every lever over its whole range through the real scenario
+engine (the code behind POST /models/{id}/scenario/sweep) and compares each curve
+with the simulator's true curve for the same batch.
 """
 
 from __future__ import annotations
@@ -68,12 +72,53 @@ def compare(nursery, batches: list[dict], df: pd.DataFrame, registry, test_from:
     return pd.DataFrame(out)
 
 
+def compare_sweeps(nursery, batches: list[dict], df: pd.DataFrame, service, test_from: str,
+                   sample: int = 60, seed: int = 0) -> pd.DataFrame:
+    """Sweep every lever through the real scenario engine and compare with the true curves."""
+    by_id = {b["batch_id"]: b for b in batches}
+    test = df[df["start_date"] >= test_from]
+    test = test.sample(min(sample, len(test)), random_state=seed)
+    out = []
+    for output, use_case in MODELS.items():
+        info = service.describe(use_case)
+        order = info["feature_schema"]["x-feature-order"]
+        level = float(test[output].abs().mean())
+        for lever in info["scenario"]["levers"]:
+            real, invented = [], []
+            for _, row in test.iterrows():
+                if lever["name"] == "light_hours" and row["lamp_type"] == "none":
+                    continue
+                features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+                body = service.sweep(use_case, {"features": features}, lever["name"])
+                values = [p["value"] for p in body["points"]]
+                predicted = np.array([p["outputs"][output]["value"] for p in body["points"]])
+                b = by_id[row["batch_id"]]
+                true = np.array([nursery.counterfactual(b, **{lever["name"]: v})[output] for v in values])
+                if np.ptp(true) >= 0.02 * level:  # the lever really matters for this batch
+                    if np.ptp(predicted) > 0:
+                        real.append(np.corrcoef(predicted, true)[0, 1])
+                    else:
+                        real.append(0.0)  # a flat prediction where the truth moves
+                else:
+                    invented.append(np.ptp(predicted) / level * 100)
+            out.append({
+                "output": output, "lever": lever["name"],
+                "batches_with_real_effect": len(real),
+                "curve_correlation": float(np.mean(real)) if real else float("nan"),
+                "batches_without_effect": len(invented),
+                "invented_effect_pct_of_level": float(np.mean(invented)) if invented else float("nan"),
+            })
+    return pd.DataFrame(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--weather", choices=["knmi", "synthetic"], default="knmi")
     parser.add_argument("--test-from", default=None, help="default: the test split of the trained model")
     parser.add_argument("--compartments", type=int, default=16, help="must match make_nursery.py")
     parser.add_argument("--json", type=Path, default=None)
+    parser.add_argument("--sweeps", action="store_true", help="also compare whole lever sweeps (slower)")
+    parser.add_argument("--sample", type=int, default=60, help="test batches used for --sweeps")
     args = parser.parse_args()
 
     daily = (knmi.load_daily(nursery_mod.STATION, "2015-06-01", nursery_mod.END) if args.weather == "knmi"
@@ -88,6 +133,13 @@ def main() -> None:
     print(result.round(1).to_string(index=False))
     if args.json:
         args.json.write_text(result.to_json(orient="records", indent=2), encoding="utf-8")
+    if args.sweeps:
+        sweeps = compare_sweeps(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
+        print("\nwhole-range sweeps through the scenario engine vs. the true curves\n")
+        print(sweeps.round(2).to_string(index=False))
+        if args.json:
+            args.json.with_name(args.json.stem + "_sweeps.json").write_text(
+                sweeps.to_json(orient="records", indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

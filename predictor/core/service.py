@@ -13,7 +13,13 @@ from typing import Any, Iterable, Iterator
 from predictor.core.manifest import Manifest
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
-from predictor.core.scenario import check_scenario, describe_scenario, resolve_scenarios
+from predictor.core.scenario import (
+    ResolvedRequest,
+    check_scenario,
+    describe_scenario,
+    resolve_scenarios,
+    sweep_values,
+)
 from predictor.core.ports import LoadedModel, ModelRegistry
 from predictor.core.validation import FeatureValidator, FieldError
 
@@ -152,6 +158,59 @@ class PredictionService:
 
     def check_scenarios(self, use_case_id: str, base: dict[str, Any], scenarios: list[dict[str, Any]]) -> dict[str, Any]:
         """Validate a scenario request and return exactly what would be calculated."""
+        uc = self._scenario_use_case(use_case_id)
+        resolved = self._resolve(uc, base.get("features"), scenarios)
+        return {
+            **self._header(uc),
+            "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings},
+            "scenarios": [{"name": s.name, "changes": s.changes, "features": s.features, "warnings": s.warnings}
+                          for s in resolved.scenarios],
+        }
+
+    def run_scenarios(self, use_case_id: str, base: dict[str, Any], scenarios: list[dict[str, Any]]) -> dict[str, Any]:
+        """Calculate the base and every scenario with the model, in one batch."""
+        uc = self._scenario_use_case(use_case_id)
+        started = time.perf_counter()
+        resolved = self._resolve(uc, base.get("features"), scenarios)
+        rows = [resolved.base] + [s.features for s in resolved.scenarios]
+        outputs = self._outputs(uc, rows)
+        self._monitor(uc, started, predicted=len(rows), rejected=0,
+                      warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
+        return {
+            **self._header(uc),
+            "base": {"record_id": base.get("record_id"), "features": resolved.base,
+                     "warnings": resolved.base_warnings, "outputs": outputs[0]},
+            "scenarios": [{"name": s.name, "changes": s.changes, "features": s.features, "warnings": s.warnings,
+                           "outputs": out} for s, out in zip(resolved.scenarios, outputs[1:])],
+        }
+
+    def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
+              stop: float | None = None, step: float | None = None) -> dict[str, Any]:
+        """Slide one lever over a range and calculate every point: a line instead of one number."""
+        uc = self._scenario_use_case(use_case_id)
+        started = time.perf_counter()
+        values, errors = sweep_values(uc.manifest.scenario, lever, start, stop, step)
+        if errors:
+            raise RequestRejected(errors, detail="invalid scenario request")
+        requested = [{"name": f"{lever} = {v}", "changes": {lever: {"set": v}}} for v in values]
+        resolved = self._resolve(uc, base.get("features"), requested)
+        rows = [resolved.base] + [s.features for s in resolved.scenarios]
+        outputs = self._outputs(uc, rows)
+        self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
+        lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
+                                                       uc.model.descriptor)["levers"] if l["name"] == lever)
+        seen = lever_info["training_range"]
+        return {
+            **self._header(uc),
+            "lever": lever_info,
+            "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
+                     "value": resolved.base[lever], "outputs": outputs[0]},
+            "points": [{"value": v, "outputs": out,
+                        "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1]}
+                       for v, out in zip(values, outputs[1:])],
+        }
+
+    def _scenario_use_case(self, use_case_id: str) -> UseCase:
         uc = self._ready(use_case_id)
         if uc.manifest.scenario is None:
             raise RequestRejected(
@@ -159,8 +218,9 @@ class PredictionService:
                   "message": f"use case '{use_case_id}' has no scenario levers; add a 'scenario' section to its manifest"}],
                 detail="invalid scenario request",
             )
-        features = base.get("features")
+        return uc
 
+    def _resolve(self, uc: UseCase, features: Any, scenarios: list[dict[str, Any]]) -> ResolvedRequest:
         def validate(row: Any) -> tuple[list[FieldError], list[str]]:
             errors = check_record(uc.manifest.policy, row)
             return (errors, []) if errors else uc.validator.validate(row)
@@ -168,12 +228,34 @@ class PredictionService:
         resolved, errors = resolve_scenarios(uc.manifest.scenario, uc.model.feature_schema, features, scenarios, validate)
         if errors:
             raise RequestRejected(errors, detail="invalid scenario request")
-        return {
-            **self._header(uc),
-            "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings},
-            "scenarios": [{"name": s.name, "changes": s.changes, "features": s.features, "warnings": s.warnings}
-                          for s in resolved.scenarios],
-        }
+        return resolved
+
+    def _outputs(self, uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Model outputs per row, keyed by output name (one output now; more with multi-output)."""
+        output = uc.model.runner.predict(uc.validator.to_matrix(rows))
+        target = uc.model.descriptor.get("target_name")
+        if uc.model.descriptor["task_type"] == "classification":
+            return [{target: {"value": output.values[i],
+                              "probabilities": {k: round(v, 6) for k, v in output.probabilities[i].items()}}}
+                    for i in range(len(rows))]
+        results = []
+        for i in range(len(rows)):
+            value, warning = self._bounded(uc, float(output.values[i]))
+            results.append({target: {"value": round(value, 6), **({"warning": warning} if warning else {})}})
+        return results
+
+    @staticmethod
+    def _bounded(uc: UseCase, value: float) -> tuple[float, str | None]:
+        """Keep a regression output within the target's physical limits (e.g. gas >= 0)."""
+        bounds = uc.model.descriptor.get("target_bounds")
+        if not bounds:
+            return value, None
+        low, high = bounds
+        if low is not None and value < low:
+            return low, f"the model predicted {value:g}, below the possible minimum {low:g}; shown as {low:g}"
+        if high is not None and value > high:
+            return high, f"the model predicted {value:g}, above the possible maximum {high:g}; shown as {high:g}"
+        return value, None
 
     # -------------------------------------------------------------- prediction
 
@@ -263,7 +345,10 @@ class PredictionService:
         for i, c in enumerate(checked):
             item: dict[str, Any] = {"record_id": c.record_id}
             if task == "regression":
-                item["prediction"] = round(float(output.values[i]), 6)
+                value, warning = self._bounded(uc, float(output.values[i]))
+                item["prediction"] = round(value, 6)
+                if warning:
+                    c.warnings.append(warning)
             elif task == "classification":
                 item["prediction"] = output.values[i]
                 item["probabilities"] = {k: round(v, 6) for k, v in output.probabilities[i].items()}
@@ -287,11 +372,11 @@ class PredictionService:
 
     def _monitor(
         self, uc: UseCase, started: float, *, predicted: int, rejected: int, warnings: int,
-        checked: list[_Checked] | None = None,
+        checked: list[_Checked] | None = None, rows: list[dict[str, Any]] | None = None,
     ) -> None:
         features = None
-        if uc.manifest.policy.log_feature_values and checked:
-            features = [c.features for c in checked]
+        if uc.manifest.policy.log_feature_values and (checked or rows):
+            features = rows if rows is not None else [c.features for c in checked]
         self.monitor.record(
             uc.manifest.use_case_id,
             predicted=predicted,
