@@ -100,7 +100,10 @@ def check_parity(model: Pipeline, artifact: bytes, X: pd.DataFrame, descriptor: 
         agreement = float(np.mean(labels == np.array(out.values)))
 
     diff = np.abs(np.asarray(expected, dtype=float) - np.asarray(actual, dtype=float))
-    passed = bool(np.allclose(expected, actual, rtol=PARITY_RTOL, atol=PARITY_ATOL))
+    # Float32 sums over hundreds of trees err in proportion to the output's size (gas in m3 can be
+    # 100,000), so the absolute tolerance scales with the largest value instead of being fixed.
+    scale = max(1.0, float(np.max(np.abs(expected)))) if np.size(expected) else 1.0
+    passed = bool(np.allclose(expected, actual, rtol=PARITY_RTOL, atol=PARITY_ATOL * scale))
     if agreement is not None:
         passed = passed and agreement >= 0.999
     return {

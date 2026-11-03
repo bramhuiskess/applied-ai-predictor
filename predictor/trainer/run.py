@@ -10,6 +10,9 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+from sklearn.base import clone
+
 from predictor.adapters.fs_registry import FilesystemRegistry
 from predictor.adapters.sources import adapter_for, read_table
 from predictor.core.manifest import MANIFEST_FILENAME, Manifest, load_manifest
@@ -36,8 +39,14 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
 
     data = prepare(df, cfg, manifest.policy)
     task = data.task
+    test_start = None
+    if cfg.test_from:
+        test_start = int((data.times < pd.Timestamp(cfg.test_from)).sum())
+        if test_start < 50 or len(data.X) - test_start < 10:
+            raise TrainingError(f"test_from {cfg.test_from} leaves {test_start} rows to train on and "
+                                f"{len(data.X) - test_start} to test on; pick another date")
     split = models.make_split(len(data.X), cfg.test_fraction, data.chronological,
-                              data.y if task == "classification" else None)
+                              data.y if task == "classification" else None, test_start)
     X_train, X_val, X_test = (data.X.iloc[idx] for idx in (split.train, split.val, split.test))
     y_train = y_val = y_test = None
     if data.y is not None:
@@ -46,14 +55,20 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     if data.evaluation_label is not None:
         label_val, label_test = data.evaluation_label.iloc[split.val], data.evaluation_label.iloc[split.test]
 
+    # Fit on train, choose on validation, then refit on train + validation: with a chronological
+    # split the validation part is the most recent data, which the final model must not miss.
+    X_fit = pd.concat([X_train, X_val])
+    y_fit = pd.concat([y_train, y_val]) if y_train is not None else None
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
     for name, pipeline in models.candidates(task, cfg.anomaly_share).items():
         pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
         make_thresholds_float32_safe(pipeline)
         val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val)
-        test_metrics = models.evaluate(task, pipeline, X_test, y_test, label_test)
-        results[name] = {"model": pipeline, "validation": val_metrics, "test": test_metrics}
+        final = clone(pipeline).fit(X_fit.to_numpy(dtype="float32"), y_fit)
+        make_thresholds_float32_safe(final)
+        test_metrics = models.evaluate(task, final, X_test, y_test, label_test)
+        results[name] = {"model": final, "validation": val_metrics, "test": test_metrics}
         if task == "anomaly" or models.is_better(task, val_metrics, best_val):
             best_name, best_val = name, val_metrics
     chosen = results[best_name]
@@ -68,7 +83,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     if data.persistence is not None:
         # "Tomorrow is like today": the honest baseline for forecasting.
         persistence = data.persistence.iloc[split.test]
-        reference = {"persistence_mae": float((persistence - y_test).abs().mean())}
+        label = cfg.baseline.label if cfg.baseline else "it stays the same"
+        reference = {"persistence_mae": float((persistence - y_test).abs().mean()), "label": label}
 
     feature_names = [f.name for f in data.features]
     schema = build_feature_schema(manifest.use_case_id, data.features, X_train, cfg.units)
@@ -85,7 +101,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "candidates": {n: {"validation": r["validation"], "test": r["test"]} for n, r in results.items()},
         "reference": reference,
         "feature_importance": models.feature_importance(chosen["model"], feature_names),
-        "split": {"chronological": data.chronological, "train": len(split.train), "validation": len(split.val),
+        "split": {"chronological": data.chronological, "test_from": cfg.test_from.isoformat() if cfg.test_from else None,
+                  "train": len(split.train), "validation": len(split.val),
                   "test": len(split.test)},
         "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
                                          split.test, manifest.policy.evaluation_rows_allowed),
@@ -198,10 +215,11 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
         manifest.description,
         "",
         f"- Task: **{d['task_type']}**" + (f", target `{d['target_name']}`" if d.get("target_name") else ""),
-        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on the validation split)",
+        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on the validation split, then retrained on train + validation)",
         f"- Data: {d['dataset']['rows']} rows from `{d['dataset']['path']}`; split train/validation/test = "
         f"{d['split']['train']}/{d['split']['validation']}/{d['split']['test']}"
-        + (" (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
+        + (f" (backtest: test from {d['split']['test_from']})" if d["split"].get("test_from")
+           else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
         "",
         "## Candidates (test split)",
@@ -214,7 +232,10 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
         marker = " (chosen)" if name == d["algorithm"] else ""
         lines.append(f"| {name}{marker} | " + " | ".join(f"{r['test'].get(m, float('nan')):.4f}" for m in metric_names) + " |")
     if d.get("reference"):
-        lines += ["", f"Reference, persistence forecast (value stays the same): MAE = {d['reference']['persistence_mae']:.4f}"]
+        ref = d["reference"]
+        better = d["metrics"]["mae"] < ref["persistence_mae"]
+        lines += ["", f"Reference, simple guess ({ref.get('label', 'it stays the same')}): MAE = {ref['persistence_mae']:.4f}"
+                  + ("" if better else " -- the simple guess is still better than the model")]
     if d.get("feature_importance"):
         lines += ["", "## Feature importance (chosen model)", ""]
         lines += [f"- `{name}`: {share:.1%}" for name, share in list(d["feature_importance"].items())[:10]]

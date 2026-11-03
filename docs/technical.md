@@ -181,6 +181,9 @@ an unknown category, or NaN/Infinity.
     "task": "auto",                             // auto | regression | classification | anomaly
     "time_column": "period",                    // sort + chronological split; not a feature
     "horizon_steps": null,                      // forecast the target N rows ahead
+    "test_from": null,                          // backtest: rows from this date on are the test set ("2021-01-01")
+    "baseline": null,                           // a column that is a simple guess for the target, e.g.
+                                                // {"column": "yield_5y_avg", "label": "same as the last 5 years"}
     "drop_columns": ["department_id"],
     "rename_columns": {},
     "evaluation_label": null,                   // anomaly only: a label used just for scoring

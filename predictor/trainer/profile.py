@@ -36,7 +36,7 @@ class PreparedData:
     target_name: str | None
     classes: list[str] | None
     evaluation_label: pd.Series | None
-    persistence: pd.Series | None  # current value of the target, for horizon tasks
+    persistence: pd.Series | None  # a simple guess: the current value (horizon) or the baseline column
     chronological: bool
     notes: list[str] = field(default_factory=list)
     times: pd.Series | None = None  # time each target value refers to (for charts)
@@ -53,7 +53,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
             f"dataset contains forbidden column(s) {clash}; remove them from the export before training"
         )
 
-    missing = [c for c in [*cfg.drop_columns, cfg.target, cfg.time_column, cfg.evaluation_label]
+    baseline_column = cfg.baseline.column if cfg.baseline else None
+    missing = [c for c in [*cfg.drop_columns, cfg.target, cfg.time_column, cfg.evaluation_label, baseline_column]
                if c and c not in df.columns]
     if missing:
         raise TrainingError(f"column(s) {missing} named in the manifest are not in the dataset {list(df.columns)}")
@@ -97,6 +98,10 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         else:
             y_raw = df[cfg.target]
             df = df.drop(columns=[cfg.target])
+            if baseline_column:
+                if not pd.api.types.is_numeric_dtype(df[baseline_column]):
+                    raise TrainingError(f"baseline column {baseline_column!r} must be numeric")
+                persistence = df[baseline_column]  # the simple guess; it may also stay a feature
         keep = y_raw.notna()
         if not keep.all():
             notes.append(f"dropped {int((~keep).sum())} rows without a target value")

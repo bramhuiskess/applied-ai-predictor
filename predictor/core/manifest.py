@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -30,11 +31,21 @@ class DataSource(_Strict):
     path: str | None = None
 
 
+class Baseline(_Strict):
+    """A column that is itself a simple guess for the target, to compare the model against."""
+
+    column: str
+    label: str
+
+
 class TrainingConfig(_Strict):
     target: str | None = None
     task: Literal["auto", "regression", "classification", "anomaly"] = "auto"
     time_column: str | None = None
     horizon_steps: int | None = Field(default=None, ge=1)
+    # Backtest: everything from this date on is the test set (e.g. train up to 2020, test 2021-2025).
+    test_from: date | None = None
+    baseline: Baseline | None = None
     drop_columns: list[str] = []
     rename_columns: dict[str, str] = {}
     evaluation_label: str | None = None
@@ -50,6 +61,10 @@ class TrainingConfig(_Strict):
             raise ValueError(f"task '{self.task}' needs a 'target'")
         if self.horizon_steps and not self.time_column:
             raise ValueError("'horizon_steps' needs a 'time_column' to order the records")
+        if self.baseline and (self.horizon_steps or self.task in ("classification", "anomaly")):
+            raise ValueError("'baseline' is for regression without horizon_steps (that has its own baseline)")
+        if self.test_from and not self.time_column:
+            raise ValueError("'test_from' needs a 'time_column' to know which records come after it")
         return self
 
 

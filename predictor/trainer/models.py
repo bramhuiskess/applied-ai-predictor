@@ -41,11 +41,15 @@ class Split:
     test: np.ndarray
 
 
-def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.Series | None) -> Split:
-    """train / validation / test. Time-ordered data is split chronologically to avoid leakage."""
+def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.Series | None,
+               test_start: int | None = None) -> Split:
+    """train / validation / test. Time-ordered data is split chronologically to avoid leakage.
+
+    `test_start` (rows are sorted by time) fixes where the test set begins, for backtests.
+    """
     index = np.arange(n)
     if chronological:
-        n_test = int(round(n * test_fraction))
+        n_test = n - test_start if test_start is not None else int(round(n * test_fraction))
         n_val = int(round((n - n_test) * 0.2))
         return Split(index[: n - n_test - n_val], index[n - n_test - n_val : n - n_test], index[n - n_test :])
     strat = stratify if stratify is not None and stratify.value_counts().min() >= 5 else None

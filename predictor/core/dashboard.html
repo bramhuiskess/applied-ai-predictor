@@ -297,9 +297,10 @@ function render() {
 function headline() {
   const ev = state.evaluation, m = ev.metrics || {}, unit = unitText(ev.target_unit);
   if (ev.task_type === "regression") {
-    const ref = ev.reference?.persistence_mae;
+    const ref = ev.reference?.persistence_mae, guess = esc(ev.reference?.label || "it stays the same");
     let text = `On average, the prediction is off by <b>${fmt(m.mae)}${esc(unit)}</b>.`;
-    if (ref != null) text += ` That is <b>${pct((ref - m.mae) / ref)} closer</b> to reality than simply assuming nothing changes.`;
+    if (ref != null && m.mae < ref) text += ` That is <b>${pct((ref - m.mae) / ref)} closer</b> to reality than the simple guess “${guess}”.`;
+    else if (ref != null) text += ` Honest result: the simple guess “${guess}” is still better (off by ${fmt(ref)}${esc(unit)}), so the model does not add value here yet.`;
     else if (m.r2 != null) text += ` It explains about <b>${pct(m.r2)}</b> of the ups and downs in the data.`;
     return text;
   }
@@ -328,12 +329,14 @@ function kpis() {
   const ev = state.evaluation, m = ev.metrics || {}, unit = ev.target_unit || "";
   const small = s => s ? `<small> ${esc(s)}</small>` : "";
   if (ev.task_type === "regression") {
-    const ref = ev.reference?.persistence_mae;
+    const ref = ev.reference?.persistence_mae, guess = esc(ev.reference?.label || "it stays the same");
     return [
       tile("Average error", fmt(m.mae) + small(unit === "%" ? "%-pt" : unit), "how far off a typical prediction is (MAE)"),
-      ref != null
-        ? tile("Better than a simple guess", pct((ref - m.mae) / ref), `the guess "it stays the same" is off by ${fmt(ref)} ${esc(unit)}`, "var(--good)")
-        : "",
+      ref != null && m.mae < ref
+        ? tile("Better than a simple guess", pct((ref - m.mae) / ref), `the guess "${guess}" is off by ${fmt(ref)} ${esc(unit)}`, "var(--good)")
+        : ref != null
+          ? tile("Simple guess still wins", pct((m.mae - ref) / ref) + small("worse"), `the guess "${guess}" is off by only ${fmt(ref)} ${esc(unit)}`, "var(--bad)")
+          : "",
       tile("Patterns explained", pct(m.r2), "share of the ups and downs the model can explain (R²)"),
     ].join("");
   }
@@ -381,7 +384,7 @@ function renderPerformance() {
       series: [
         { name: "What really happened", values: r.actual, color: "var(--actual)", width: 1.6 },
         { name: "Our prediction", values: r.predicted, color: "var(--accent)", width: 2.2 },
-        ...(r.persistence ? [{ name: `Simple guess: "it stays the same"`, values: r.persistence, color: "var(--ref)", width: 1.2, dash: true }] : []),
+        ...(r.persistence ? [{ name: `Simple guess: "${esc(ev.reference?.label || "it stays the same")}"`, values: r.persistence, color: "var(--ref)", width: 1.2, dash: true }] : []),
       ],
     });
   } else if (ev.task_type === "classification") {
@@ -424,7 +427,7 @@ function renderSide() {
     cls: name === ev.algorithm ? "chosen" : "",
   }));
   if (ev.reference?.persistence_mae != null) {
-    items.push({ label: `Simple guess: "it stays the same"`, value: ev.reference.persistence_mae, text: `off by ${fmt(ev.reference.persistence_mae)}${unit}`, cls: "ref" });
+    items.push({ label: `Simple guess: "${esc(ev.reference.label || "it stays the same")}"`, value: ev.reference.persistence_mae, text: `off by ${fmt(ev.reference.persistence_mae)}${unit}`, cls: "ref" });
   }
   const simpleWon = !String(ev.algorithm).includes("lightgbm");
   el.innerHTML = `<h2>Why this model?</h2>
