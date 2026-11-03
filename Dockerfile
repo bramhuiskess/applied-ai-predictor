@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir ".[train]"
 COPY scripts ./scripts
 COPY usecases ./usecases
 COPY data ./data
-RUN python scripts/make_datasets.py && predictor train
+RUN python scripts/make_datasets.py && python scripts/make_nursery.py && python scripts/make_arable.py \
+    && predictor train
 
 # Stage 2: the serving image. No pandas, scikit-learn or LightGBM: the core only
 # needs the ONNX runtime, which proves the core is independent of training libraries.

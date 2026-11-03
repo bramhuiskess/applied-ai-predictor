@@ -1,0 +1,43 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "nursery-plants-sold",
+  "description": "Number of sellable plants from a batch (synthetic nursery with a known cause-and-effect model, real KNMI weather 2016-2025).",
+  "data_source": {
+    "adapter": "csv-file",
+    "path": "data/nursery.csv"
+  },
+  "training": {
+    "target": "plants_sold",
+    "task": "regression",
+    "time_column": "start_date",
+    "drop_columns": [
+      "batch_id",
+      "compartment",
+      "weeks_to_harvest",
+      "gas_m3",
+      "electricity_kwh"
+    ],
+    "units": {
+      "temp_setpoint_c": "°C",
+      "light_hours": "h/day",
+      "co2_ppm": "ppm",
+      "ec_ms_cm": "mS/cm",
+      "plant_density_m2": "plants/m²",
+      "area_m2": "m²",
+      "u_value": "W/m²K",
+      "gas_price_eur_m3": "€/m³",
+      "outside_temp_avg_c": "°C",
+      "radiation_avg_j_cm2": "J/cm²/day",
+      "plants_sold": "plants"
+    }
+  },
+  "model": {
+    "runner": "onnx",
+    "version": "latest"
+  },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  }
+}
