@@ -13,7 +13,7 @@ from typing import Any, Iterable, Iterator
 from predictor.core.manifest import Manifest
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
-from predictor.core.scenario import check_scenario, describe_scenario
+from predictor.core.scenario import check_scenario, describe_scenario, resolve_scenarios
 from predictor.core.ports import LoadedModel, ModelRegistry
 from predictor.core.validation import FeatureValidator, FieldError
 
@@ -30,9 +30,10 @@ class UseCaseNotReady(Exception):
 
 
 class RequestRejected(Exception):
-    def __init__(self, errors: list[dict[str, Any]]) -> None:
+    def __init__(self, errors: list[dict[str, Any]], detail: str = "invalid records") -> None:
         super().__init__(f"{len(errors)} invalid record(s)")
         self.errors = errors
+        self.detail = detail
 
 
 @dataclass
@@ -145,6 +146,33 @@ class PredictionService:
             "feature_importance": descriptor.get("feature_importance"),
             "split": descriptor.get("split"),
             "sample": descriptor.get("evaluation"),
+        }
+
+    # --------------------------------------------------------------- scenarios
+
+    def check_scenarios(self, use_case_id: str, base: dict[str, Any], scenarios: list[dict[str, Any]]) -> dict[str, Any]:
+        """Validate a scenario request and return exactly what would be calculated."""
+        uc = self._ready(use_case_id)
+        if uc.manifest.scenario is None:
+            raise RequestRejected(
+                [{"scenario": None, "field": "scenario",
+                  "message": f"use case '{use_case_id}' has no scenario levers; add a 'scenario' section to its manifest"}],
+                detail="invalid scenario request",
+            )
+        features = base.get("features")
+
+        def validate(row: Any) -> tuple[list[FieldError], list[str]]:
+            errors = check_record(uc.manifest.policy, row)
+            return (errors, []) if errors else uc.validator.validate(row)
+
+        resolved, errors = resolve_scenarios(uc.manifest.scenario, uc.model.feature_schema, features, scenarios, validate)
+        if errors:
+            raise RequestRejected(errors, detail="invalid scenario request")
+        return {
+            **self._header(uc),
+            "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings},
+            "scenarios": [{"name": s.name, "changes": s.changes, "features": s.features, "warnings": s.warnings}
+                          for s in resolved.scenarios],
         }
 
     # -------------------------------------------------------------- prediction
