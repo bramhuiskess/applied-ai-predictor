@@ -13,6 +13,7 @@ from typing import Any, Iterable, Iterator
 from predictor.core.manifest import Manifest
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
+from predictor.core.scenario import check_scenario, describe_scenario
 from predictor.core.ports import LoadedModel, ModelRegistry
 from predictor.core.validation import FeatureValidator, FieldError
 
@@ -75,6 +76,7 @@ class PredictionService:
             validator = None
             if model is not None:
                 check_schema(manifest.use_case_id, manifest.policy, model.feature_schema)
+                check_scenario(manifest.use_case_id, manifest.scenario, model.feature_schema)
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
@@ -122,6 +124,7 @@ class PredictionService:
                 for name in schema["x-feature-order"]
             ],
             "policy": uc.manifest.policy.model_dump(),
+            "scenario": describe_scenario(uc.manifest.scenario, schema, descriptor),
             "feature_schema": schema,
         }
 

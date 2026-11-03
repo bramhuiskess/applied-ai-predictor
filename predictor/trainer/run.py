@@ -39,6 +39,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
 
     data = prepare(df, cfg, manifest.policy)
     task = data.task
+    feature_names = [f.name for f in data.features]
+    monotone = _scenario_constraints(manifest, data)
     test_start = None
     if cfg.test_from:
         test_start = int((data.times < pd.Timestamp(cfg.test_from)).sum())
@@ -61,7 +63,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     y_fit = pd.concat([y_train, y_val]) if y_train is not None else None
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
-    for name, pipeline in models.candidates(task, cfg.anomaly_share).items():
+    excluded: dict[str, list[str]] = {}
+    for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone).items():
         pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
         make_thresholds_float32_safe(pipeline)
         val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val)
@@ -69,8 +72,16 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         make_thresholds_float32_safe(final)
         test_metrics = models.evaluate(task, final, X_test, y_test, label_test)
         results[name] = {"model": final, "validation": val_metrics, "test": test_metrics}
+        violations = models.effect_violations(final, feature_names, monotone)
+        if violations:
+            # A scenario model must respect what the manifest declares, so it cannot win.
+            excluded[name] = violations
+            data.notes.append(f"{name} was not eligible: it contradicts the declared effects ({'; '.join(violations)})")
+            continue
         if task == "anomaly" or models.is_better(task, val_metrics, best_val):
             best_name, best_val = name, val_metrics
+    if best_name is None:
+        raise TrainingError(f"no candidate respects the declared scenario effects: {excluded}")
     chosen = results[best_name]
     suspects = _leakage_suspects(data, X_train, y_train, cfg.target if cfg.horizon_steps else None)
     if suspects:
@@ -86,7 +97,6 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         label = cfg.baseline.label if cfg.baseline else "it stays the same"
         reference = {"persistence_mae": float((persistence - y_test).abs().mean()), "label": label}
 
-    feature_names = [f.name for f in data.features]
     schema = build_feature_schema(manifest.use_case_id, data.features, X_train, cfg.units)
     descriptor: dict[str, Any] = {
         "use_case_id": manifest.use_case_id,
@@ -101,6 +111,9 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "candidates": {n: {"validation": r["validation"], "test": r["test"]} for n, r in results.items()},
         "reference": reference,
         "feature_importance": models.feature_importance(chosen["model"], feature_names),
+        "scenario_constraints": ({"effects": {n: ("increasing" if d > 0 else "decreasing")
+                                              for n, d in zip(feature_names, monotone) if d},
+                                  "excluded_candidates": excluded} if monotone else None),
         "split": {"chronological": data.chronological, "test_from": cfg.test_from.isoformat() if cfg.test_from else None,
                   "train": len(split.train), "validation": len(split.val),
                   "test": len(split.test)},
@@ -239,6 +252,18 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
     if d.get("feature_importance"):
         lines += ["", "## Feature importance (chosen model)", ""]
         lines += [f"- `{name}`: {share:.1%}" for name, share in list(d["feature_importance"].items())[:10]]
+    if manifest.scenario:
+        target = manifest.training.target
+        lines += ["", "## Scenario levers", "", "| lever | range | step | declared effect on " + f"`{target}` |", "|---|---|---|---|"]
+        for name, lever in manifest.scenario.levers.items():
+            effect = lever.effects.get(target, "none (free)")
+            lines.append(f"| `{name}` | {lever.min:g} - {lever.max:g} | {lever.step:g} | {effect} |")
+        constraints = d.get("scenario_constraints")
+        if constraints:
+            lines += ["", "Declared effects are hard monotone constraints for LightGBM; "
+                      "a linear model that contradicts them is not eligible."]
+            for name, why in constraints["excluded_candidates"].items():
+                lines.append(f"- `{name}` excluded: {'; '.join(why)}")
     p = d.get("parity")
     if p:
         lines += ["", "## ONNX parity check", "",
@@ -305,6 +330,27 @@ def _typical_input(features, X_train) -> dict[str, Any]:
         else:
             example[spec.name] = round(float(column.median()), 3)
     return example
+
+
+def _scenario_constraints(manifest: Manifest, data) -> list[int] | None:
+    """Check the scenario levers against the prepared data and build the monotone constraints."""
+    if manifest.scenario is None:
+        return None
+    kinds = {f.name: f.kind for f in data.features}
+    for name in manifest.scenario.levers:
+        if name not in kinds:
+            raise TrainingError(f"scenario lever {name!r} is not a model input after preparing the data "
+                                f"(missing, constant or dropped; inputs: {', '.join(kinds)})")
+        if kinds[name] == "categorical":
+            raise TrainingError(f"scenario lever {name!r} is categorical; only numeric and yes/no inputs can be levers")
+    target = manifest.training.target
+    directions = {name: lever.effects[target] for name, lever in manifest.scenario.levers.items()
+                  if target in lever.effects}
+    if not directions:
+        return None
+    if data.task == "classification" and len(data.classes or []) > 2:
+        raise TrainingError("scenario effects are only supported for regression and yes/no classification")
+    return [{"increasing": 1, "decreasing": -1}.get(directions.get(f.name), 0) for f in data.features]
 
 
 def _leakage_suspects(data, X_train, y_train, horizon_source: str | None) -> list[str]:
