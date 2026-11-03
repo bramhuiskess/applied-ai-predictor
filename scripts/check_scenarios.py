@@ -61,6 +61,8 @@ def compare(nursery, batches: list[dict], df: pd.DataFrame, registry, test_from:
                 "true_change_pct": 100 * true.sum() / base_total,
                 "predicted_change_pct": 100 * pred.sum() / base_total,
                 "direction_right_pct": 100 * float(np.mean(np.sign(pred.round(6)) == np.sign(true.round(6)))),
+                # Predicting "no change" is cautious; predicting the opposite direction is wrong.
+                "opposite_direction_pct": 100 * float(np.mean(np.sign(pred.round(6)) * np.sign(true.round(6)) < 0)),
                 "per_batch_corr": float(np.corrcoef(pred, true)[0, 1]) if pred.std() > 0 and true.std() > 0 else float("nan"),
             })
     return pd.DataFrame(out)

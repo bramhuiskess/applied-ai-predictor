@@ -139,15 +139,58 @@ def nursery_chart() -> Path:
     return path
 
 
+CONSTRAINED_ROWS = [
+    ("plant_density_m2 +5", "gas_m3", "+5 plants/m² → gas"),
+    ("co2_ppm +200", "weeks_to_harvest", "+200 ppm CO₂ → weeks to harvest"),
+    ("light_hours +2", "weeks_to_harvest", "+2 h light → weeks to harvest"),
+    ("co2_ppm +200", "gas_m3", "+200 ppm CO₂ → gas"),
+    ("light_hours +2", "gas_m3", "+2 h light → gas"),
+]
+
+
+def constraints_chart(before: Path, after: Path) -> Path:
+    b = {(r["scenario"], r["output"]): r for r in json.loads(before.read_text())}
+    a = {(r["scenario"], r["output"]): r for r in json.loads(after.read_text())}
+    fig, ax = plt.subplots(figsize=(11, 5.4))
+    y = np.arange(len(CONSTRAINED_ROWS))[::-1] * 1.25
+    h = 0.32
+    series = [("True effect (simulator)", BLUE, [b[(s, o)]["true_change_pct"] for s, o, _ in CONSTRAINED_ROWS]),
+              ("Model without declared effects", ORANGE, [b[(s, o)]["predicted_change_pct"] for s, o, _ in CONSTRAINED_ROWS]),
+              ("Model with declared effects", AQUA, [a[(s, o)]["predicted_change_pct"] for s, o, _ in CONSTRAINED_ROWS])]
+    for i, (label, color, values) in enumerate(series):
+        offset = (1 - i) * h
+        ax.barh(y + offset, values, h - 0.04, color=color, label=label)
+        for yy, v in zip(y, values):
+            ax.text(v + (0.5 if v >= 0 else -0.5), yy + offset, f"{v:+.1f}%", va="center",
+                    ha="left" if v >= 0 else "right", fontsize=9, color=MUTED)
+    ax.axvline(0, color=MUTED, linewidth=1)
+    ax.set_yticks(y, [name for _, _, name in CONSTRAINED_ROWS])
+    ax.grid(axis="y", visible=False)
+    ax.set_xlim(-31, 6)
+    ax.set_xlabel("change vs. the same batches without the scenario (%)")
+    ax.legend(loc="upper left", frameon=False, fontsize=9.5)
+    title(fig, "Declaring the direction of a lever makes scenarios more trustworthy",
+          "Unseen test batches. With declared effects the model never goes the wrong way (density → gas was wrong before).")
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    path = OUT / "scenario_constraints.png"
+    fig.savefig(path, dpi=150)
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenarios-small", type=Path, required=True)
-    parser.add_argument("--scenarios-large", type=Path, required=True)
+    parser.add_argument("--scenarios-small", type=Path)
+    parser.add_argument("--scenarios-large", type=Path)
+    parser.add_argument("--constraints", type=Path, nargs=2, metavar=("BEFORE", "AFTER"),
+                        help="check_scenarios.py JSON without and with declared effects")
     parser.add_argument("--models", type=Path, default=Path("models"))
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
-    for path in (scenario_chart(args.scenarios_small, args.scenarios_large), arable_chart(args.models), nursery_chart()):
-        print("wrote", path)
+    if args.constraints:
+        print("wrote", constraints_chart(*args.constraints))
+    if args.scenarios_small and args.scenarios_large:
+        for path in (scenario_chart(args.scenarios_small, args.scenarios_large), arable_chart(args.models), nursery_chart()):
+            print("wrote", path)
 
 
 if __name__ == "__main__":
