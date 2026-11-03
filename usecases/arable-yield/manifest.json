@@ -1,0 +1,44 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "arable-yield",
+  "description": "Crop yield per hectare from the growing-season weather (CBS + KNMI, real data). Backtest: trained up to 2020, tested on 2021-2025.",
+  "data_source": {
+    "adapter": "csv-file",
+    "path": "data/arable.csv"
+  },
+  "training": {
+    "target": "yield_t_ha",
+    "task": "regression",
+    "time_column": "season",
+    "test_from": "2021-01-01",
+    "drop_columns": [
+      "year",
+      "harvested_ha"
+    ],
+    "units": {
+      "yield_t_ha": "t/ha",
+      "yield_5y_avg": "t/ha",
+      "season_temp_c": "°C",
+      "season_rain_mm": "mm",
+      "season_radiation_mj_m2": "MJ/m²",
+      "max_rain_deficit_mm": "mm",
+      "early_season_rain_mm": "mm",
+      "hot_days": "days",
+      "frost_days": "days",
+      "wet_days": "days"
+    },
+    "baseline": {
+      "column": "yield_5y_avg",
+      "label": "same as the average of the last 5 years"
+    }
+  },
+  "model": {
+    "runner": "onnx",
+    "version": "latest"
+  },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  }
+}

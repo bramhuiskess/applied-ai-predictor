@@ -17,21 +17,24 @@ vond **schaalbaar** en **modulair** het belangrijkst, dus:
 
 | Map | Wat |
 |---|---|
-| [`prototype/`](prototype/) | De werkende backend (Python, FastAPI, ONNX). Daar staat ook de uitgebreide README. |
-
-Later komt er waarschijnlijk meer bij (bijv. een dashboard), dat krijgt dan een eigen map.
+| [`predictor/`](predictor/) | De backend zelf: core (API, validatie, privacy), adapters (ONNX, opslag) en de trainer |
+| [`usecases/`](usecases/) | Eén `manifest.json` per use case, verder geen code |
+| [`scripts/`](scripts/) | Datasets maken/downloaden, demo en benchmark |
+| [`tests/`](tests/) | Alle tests (draaien ook op GitHub Actions) |
+| [`notebooks/`](notebooks/) | Technische uitleg van de modellen |
+| [`docs/`](docs/) | Uitgebreide technische docs ([`technical.md`](docs/technical.md)) |
 
 ## Snel proberen
 
 ```bash
-cd prototype
 docker build -t applied-ai-predictor .
 docker run --rm -p 8000:8000 applied-ai-predictor
 ```
 
-Open daarna http://localhost:8000/docs, of draai `./scripts/demo.sh` voor de demo.
+Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
+http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
-Zonder Docker kan ook, zie [`prototype/README.md`](prototype/README.md).
+Zonder Docker kan ook, zie [`docs/technical.md`](docs/technical.md).
 
 ## Wat kan het nu
 
@@ -39,10 +42,24 @@ Zonder Docker kan ook, zie [`prototype/README.md`](prototype/README.md).
   en afwijkingen spotten zonder labels
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
-- 52 tests, die draaien ook op GitHub Actions
+- dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
+- 75 tests, die draaien ook op GitHub Actions
+
+## Datasets voor scenario-voorspelling
+
+Voor de kwekers-use case (wat gebeurt er in week 44 als ik nu de kas van 20 naar 21 graden zet?) zijn er
+testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
+
+- **gesimuleerde kwekerij** op echt KNMI-weer 2016-2025, met een *antwoordmodel*: voor elk scenario weten we de echte uitkomst, dus we kunnen testen of de voorspelling klopt
+- **echte akkerbouwdata** (CBS + KNMI, 1999-2025), met een backtest: trainen tot 2020, testen op 2021-2025
+- een kapotte versie van de kwekerijdata (vastgelopen sensor, pieken, verkeerde eenheden) voor later
+
+```bash
+python scripts/make_nursery.py --faults && python scripts/make_arable.py && predictor train
+python scripts/check_scenarios.py   # klopt het model met het antwoordmodel?
+```
 
 ## Nog te doen
 
 - tijdreeksen met historie (lags/rolling features)
 - login/auth voordat het echt online gaat
-- dashboard (nice to have)
