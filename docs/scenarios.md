@@ -7,8 +7,8 @@ used. This document grows with the scenario tickets.
 | Ticket | Status |
 |---|---|
 | 1. Datasets for testing | done, see [datasets.md](datasets.md) |
-| 2. Scenario variables in manifest.json | **done (this page)** |
-| 3. Scenario input | next |
+| 2. Scenario variables in manifest.json | done |
+| 3. Scenario input | **done** |
 | 4. Calculate a scenario | |
 | 5. Difference base vs. scenario | |
 
@@ -87,8 +87,48 @@ input for ticket 4.
 `beyond_training_data` warns when a lever's range goes past what the model has seen: tree models
 predict a flat line there, so a scenario at the edge looks like "no effect".
 
+## Scenario input (ticket 3)
+
+`POST /models/{id}/scenario/check` takes the current situation (`base`) and up to 20 scenarios,
+and returns exactly what would be calculated, or one 422 that lists every problem at once.
+
+```jsonc
+POST /models/nursery-gas/scenario/check
+{
+  "base": { "record_id": "K07 week 42", "features": { "temp_setpoint_c": 19, "light_hours": 7.5, "...": "all model inputs" } },
+  "scenarios": [
+    { "name": "1 degree warmer",       "changes": { "temp_setpoint_c": { "delta": 1 } } },
+    { "name": "more light, less heat", "changes": { "light_hours": { "set": 12 }, "temp_setpoint_c": 18 } }
+  ]
+}
+```
+
+A change is `{"set": value}`, `{"delta": change}`, or a plain number (short for `set`). The answer
+repeats the base and gives, per scenario, what changed and the complete input row:
+
+```jsonc
+{ "name": "1 degree warmer",
+  "changes": [ { "lever": "temp_setpoint_c", "label": "Greenhouse temperature", "unit": "°C", "from": 19, "to": 20 } ],
+  "features": { "temp_setpoint_c": 20, "light_hours": 7.5, "...": "..." },
+  "warnings": [] }
+```
+
+| Situation | Result |
+|---|---|
+| a change to something that is not a lever (weather, season) | 422: "'outside_temp_avg_c' cannot be changed in a scenario; you can change: ..." |
+| a value outside the lever's `min`/`max` | 422: "temp_setpoint_c would become 27 (19 +8), outside the allowed range 17 - 23" |
+| a yes/no lever set to 0.5 | 422 from the feature schema |
+| the base breaks the schema or the privacy policy | 422, with `"scenario": null` |
+| two scenarios with the same name, none, more than 20, `set` and `delta` together, NaN | 422 |
+| a value beyond what the model has seen | 200 with a warning (tree models predict a flat line there) |
+| a scenario that changes nothing | 200 with a warning |
+| a use case without levers | 422: "add a 'scenario' section to its manifest" |
+
+Every error names the scenario and the field, so a client can put the message next to the right slider.
+The endpoint only resolves and checks; ticket 4 calculates the same request with the model.
+
 ### Not in this ticket
 
 - Several outputs in one use case (the multi-output tickets): `outputs` and `effects` are already
   keyed by output name, so they work unchanged once a use case has more than one target.
-- Sending a scenario and calculating it (tickets 3 and 4), money and the difference view (ticket 5).
+- Calculating a scenario (ticket 4), money and the difference view (ticket 5).

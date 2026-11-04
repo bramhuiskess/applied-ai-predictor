@@ -143,6 +143,7 @@ existed still work; retrain them to see the charts.
 | GET | `/use-cases` | all use cases with status (`ready` / `not_trained`) |
 | GET | `/models/{id}` | metadata: inputs, kinds, units, training ranges, metrics, policy, JSON Schema |
 | GET | `/models/{id}/evaluation` | model comparison, feature importance and a test-set sample for charts |
+| POST | `/models/{id}/scenario/check` | check a scenario request (base + up to 20 scenarios) and return what would be calculated, see [scenarios.md](scenarios.md) |
 | POST | `/models/{id}/predict` | JSON, up to 10,000 records, all-or-nothing |
 | POST | `/models/{id}/predict/batch` | JSONL in, JSONL out, unlimited size, errors per line |
 | GET | `/` | dashboard (redirects to `/dashboard`) |
