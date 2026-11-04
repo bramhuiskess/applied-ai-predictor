@@ -38,9 +38,11 @@ contains **no pandas, scikit-learn or LightGBM**, only the ONNX runtime.
 
 ### Local development
 
+Python 3.11 or newer is required (macOS's built-in 3.9 does not work; `brew install python@3.12`).
+
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ".[train,dev]"
+./scripts/setup.sh                # picks Python >= 3.11, creates .venv, installs the project
+. .venv/bin/activate              # starts the virtual environment
 python scripts/make_datasets.py   # writes data/*.csv (downloads AI4I 2020 once)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
@@ -56,7 +58,7 @@ Forest, the ONNX export with the float32 threshold bug the parity check catches,
 detection. It is saved with its outputs, so it can be read without running it. To run it:
 
 ```bash
-pip install -e ".[train,notebook]"
+./scripts/setup.sh train,notebook
 python scripts/make_datasets.py
 jupyter lab notebooks/model_internals.ipynb
 ```
