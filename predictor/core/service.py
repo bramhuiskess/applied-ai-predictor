@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
 from predictor.core.certainty import SupportIndex, certainty
+from predictor.core.join_info import describe_joins
 from predictor.core.manifest import Manifest, ManifestError
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
@@ -70,6 +71,7 @@ class _Checked:
     features: Any
     errors: list[FieldError]
     warnings: list[str]
+    filled: dict[str, Any] | None = None  # columns the joins filled in (shown to the caller, absent without joins)
 
 
 class PredictionService:
@@ -374,14 +376,16 @@ class PredictionService:
         if errors:
             # Policy violations are reported before anything else touches the data.
             return _Checked(record_id, features, errors, [])
+        sent = features
         features, join_errors, join_warnings = _enrich(uc, features)
         if join_errors:
             return _Checked(record_id, features, join_errors, [])
+        filled = _filled_in(uc, sent, features)
         errors = check_record(uc.manifest.policy, features)  # e.g. a group size that was joined in
         if errors:
             return _Checked(record_id, features, errors, [])
         errors, warnings = uc.validator.validate(features)
-        return _Checked(record_id, features, errors, [*join_warnings, *warnings])
+        return _Checked(record_id, features, errors, [*join_warnings, *warnings], filled)
 
     def _run(self, uc: UseCase, checked: list[_Checked]) -> list[dict[str, Any]]:
         matrix = uc.validator.to_matrix([c.features for c in checked])
@@ -402,6 +406,8 @@ class PredictionService:
                 item["prediction"] = output.values[i]
                 item["anomaly_score"] = round(float(output.scores[i]), 6)
             item["warnings"] = c.warnings
+            if c.filled:
+                item["filled_in"] = c.filled
             results.append(item)
         return results
 
@@ -460,12 +466,16 @@ def _derived_info(uc: UseCase, name: str) -> dict[str, Any]:
     return {"derived_by": joins.derived[name], "required": False}
 
 
+def _filled_in(uc: UseCase, sent: Any, enriched: Any) -> dict[str, Any] | None:
+    """The columns the joins added to a request (None when nothing was filled in)."""
+    joins = uc.model.joins if uc.model else None
+    if joins is None or not isinstance(sent, dict):
+        return None
+    filled = {c: enriched[c] for c in joins.derived if c in enriched and sent.get(c) is None}
+    return filled or None
+
+
 def _describe_joins(uc: UseCase) -> list[dict[str, Any]]:
-    """For clients: which inputs can be sent instead of the joined columns."""
-    joins = uc.model.joins
-    if joins is None:
-        return []
-    features = set(uc.model.feature_schema["properties"])
-    trained = {j["name"]: j for j in uc.model.descriptor.get("joins", [])}
-    return [{"name": j.name, "accepts": j.base_inputs, "fills": [c for c in j.new_columns if c in features],
-             "fallback": j.fallback, "lookup_rows": trained.get(j.name, {}).get("lookup_rows")} for j in joins.joins]
+    """For clients: how the model's inputs are connected to lookup tables and what can be sent instead."""
+    return describe_joins(uc.model.joins, uc.model.descriptor, set(uc.model.feature_schema["properties"]),
+                          uc.manifest.training.units)

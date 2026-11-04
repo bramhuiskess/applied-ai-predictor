@@ -48,7 +48,7 @@ python scripts/make_nursery.py && python scripts/make_arable.py   # scenario dat
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 315 tests, ~95 s, fully offline
+pytest                            # 321 tests, ~95 s, fully offline
 ```
 
 ### Technical notebook
@@ -212,7 +212,12 @@ also works in the offline container, and it adapts to every use case from the AP
   or "random checks vs. the model" (anomaly detection);
 - why this model was chosen (simple vs. advanced model), what matters most, and the privacy rules;
 - **Try it yourself**: sliders for every input and an instant answer. The raw request and response
-  JSON are under "Technical details", including the refusal when private data is sent.
+  JSON are under "Technical details", including the refusal when private data is sent;
+- **only for use cases with `joins`**: a *Connected data* card (what each table adds, how well it matched, how much of
+  the prediction it explains), a *Look up / Enter myself* switch per join in the form (a date picker and dropdowns for the
+  join inputs instead of the joined sliders), and a "Looked up from connected data" list with the values the service
+  filled in. All of it is built from `GET /models/{id}` (`joins`, `inputs[].derived_by`) and the `filled_in` field of a
+  prediction, so a new dataset with joins needs no dashboard code. Use cases without joins look exactly as before.
 
 For the in-depth version of the same story, see the technical notebook below.
 

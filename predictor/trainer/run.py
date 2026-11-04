@@ -172,6 +172,7 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "dataset": {"path": str(source), "rows": base_rows, "sha256": _sha256(source),
                     **({"rows_after_joins": int(len(df))} if joined else {})},
         "joins": joined.summary if joined else [],
+        **({"joins_example": _joins_example(joined, df)} if joined and joined.engine and manifest.policy.evaluation_rows_allowed else {}),
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "environment": _environment(),
     }
@@ -423,6 +424,12 @@ def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_in
             "label": [bool(v) for v in models._truthy(label_test.iloc[rows])] if label_test is not None else None,
         }
     return sample
+
+
+def _joins_example(joined, df: pd.DataFrame) -> dict[str, str]:
+    """The join inputs (compartment, start date, ...) of one real, typical row: consistent defaults for a form."""
+    row = df.iloc[len(df) // 2]
+    return {c: str(row[c]) for c in joined.engine.inputs if c not in joined.engine.derived and c in df.columns}
 
 
 def _typical_input(features, X_train) -> dict[str, Any]:

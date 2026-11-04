@@ -401,3 +401,58 @@ def test_the_arable_split_tables_reproduce_the_season_columns(tmp_path):
     assert len(applied.df) == len(df) and applied.consumed == ["season_start", "season_end"]
     for column in make_arable.JOINED_COLUMNS:
         assert (applied.df[column].to_numpy() == df[column].to_numpy()).all(), column
+
+
+# --------------------------------------------------------------------------- what the dashboard shows
+
+def test_describe_gives_a_ready_to_show_description_of_every_join(nursery):
+    joins = {j["name"]: j for j in nursery["client"].get("/models/nursery-gas").json()["joins"]}
+    weather, compartment = joins["weather"], joins["compartment"]
+    assert weather["title"] == "Weather" and weather["source_file"] == "weather.csv"  # a file name, not a server path
+    assert weather["summary"] == "Average of temp_mean_c, radiation_j_cm2 from Start date up to Start date + 10 weeks."
+    assert weather["matched"] == 1.0 and weather["dropped_rows"] == 0 and weather["lookup_rows"] == len(nursery["daily"])
+    assert weather["lookup_range"] == ["2015-06-01", "2025-12-31"] and weather["units"]["outside_temp_avg_c"] == "°C"
+    date_input = weather["inputs"][0]
+    assert (date_input["name"], date_input["role"], date_input["range"]) == ("start_date", "date", weather["lookup_range"])
+    key_input = compartment["inputs"][0]
+    assert key_input["role"] == "key" and key_input["allowed_values"] == sorted(nursery["df"]["compartment"].unique())
+    assert compartment["summary"] == "Takes area_m2, lamp_type, u_value from a table, matched on Compartment."
+
+
+def test_the_examples_are_a_real_row_and_work_as_a_request(nursery):
+    client = nursery["client"]
+    joins = client.get("/models/nursery-gas").json()["joins"]
+    example = {i["name"]: i["example"] for j in joins for i in j["inputs"]}
+    assert example["compartment"] in set(nursery["df"]["compartment"]) and example["start_date"] in set(nursery["df"]["start_date"])
+    row = nursery["df"][(nursery["df"]["compartment"] == example["compartment"]) & (nursery["df"]["start_date"] == example["start_date"])]
+    assert len(row) == 1  # both come from the same real batch
+    features = {**join_inputs_only(client, row.iloc[0])}
+    assert predict(client, features)["prediction"] > 0
+
+
+def test_predictions_say_which_columns_were_filled_in(nursery):
+    client, row = nursery["client"], nursery["df"].iloc[40]
+    item = predict(client, join_inputs_only(client, row))
+    assert item["filled_in"] == {c: (row[c].item() if hasattr(row[c], "item") else row[c]) for c in DERIVED}
+    assert "filled_in" not in predict(client, full_features(client, row))  # nothing was looked up
+    partly = predict(client, {**join_inputs_only(client, row), "outside_temp_avg_c": 1.5})
+    assert set(partly["filled_in"]) == set(DERIVED) - {"outside_temp_avg_c"}
+
+
+def test_use_cases_without_joins_get_no_new_keys(project):
+    client = TestClient(bootstrap.build_app(project / "usecases", project / "models"))
+    body = client.get("/models/pump-failure").json()
+    assert body["joins"] == []
+    features = {i["name"]: (i["allowed_values"][0] if i["allowed_values"] else sum(i["training_range"]) / 2) for i in body["inputs"]}
+    item = client.post("/models/pump-failure/predict", json={"records": [{"features": features}]}).json()["predictions"][0]
+    assert "filled_in" not in item
+
+
+def test_no_example_row_is_stored_for_personal_data(nursery, tmp_path):
+    manifest = json.loads(json.dumps(nursery["manifest"]))
+    manifest["policy"] = {"contains_personal_data": True, "log_feature_values": False}
+    result = train_use_case(write(tmp_path, manifest), bootstrap.build_registry(tmp_path / "models"))
+    assert "joins_example" not in result
+    client = TestClient(bootstrap.build_app(tmp_path / "usecases", tmp_path / "models"))
+    inputs = [i for j in client.get("/models/nursery-gas").json()["joins"] for i in j["inputs"]]
+    assert inputs and all(i["example"] is None for i in inputs)
