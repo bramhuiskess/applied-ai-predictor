@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.0",
   "use_case_id": "greenhouse-electricity",
-  "description": "Lamp electricity per m² per day of a real tomato greenhouse (Autonomous Greenhouse Challenge, WUR, 2019-2020).",
+  "description": "Lamp electricity per m² per day of real greenhouses (Autonomous Greenhouse Challenge, WUR): cucumber 2018 and tomato 2019-2020, 12 compartments. Tested on the two compartments run by Dutch commercial growers.",
   "data_source": {
     "adapter": "csv-file",
     "path": "data/greenhouse_days.csv"
@@ -12,7 +12,8 @@
     "time_column": "date",
     "target_min": 0,
     "drop_columns": [
-      "heat_mj_m2"
+      "heat_mj_m2",
+      "crop"
     ],
     "units": {
       "heat_setpoint_c": "°C",
@@ -25,15 +26,16 @@
       "radiation_j_cm2": "J/cm²/day",
       "wind_ms": "m/s",
       "outside_rh_pct": "%",
-      "season_day": "days",
       "electricity_kwh_m2": "kWh/m²",
       "rail_min_c": "°C",
-      "grow_min_c": "°C"
+      "grow_min_c": "°C",
+      "lamp_power_w_m2": "W/m²"
     },
     "test_group": {
       "column": "greenhouse",
       "values": [
-        "Reference"
+        "Reference 2018",
+        "Reference 2020"
       ]
     }
   },

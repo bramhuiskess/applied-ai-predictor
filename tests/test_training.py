@@ -26,10 +26,11 @@ def test_task_is_detected_automatically(project):
     assert "pump_id" not in d["features"]
 
 
-def test_lightgbm_beats_the_baseline_on_the_greenhouse_forecast(project):
+def test_trees_beat_the_baseline_on_the_greenhouse_forecast(project):
     d = descriptor(project, "greenhouse-climate")
     assert d["split"]["chronological"] is True
-    assert d["algorithm"] == "lightgbm"
+    assert d["algorithm"] in ("lightgbm", "blend")   # the blend is half LightGBM
+    assert d["metrics"]["mae"] < d["candidates"]["linear_regression"]["test"]["mae"]
     assert d["metrics"]["mae"] < d["reference"]["persistence_mae"]
 
 

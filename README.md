@@ -11,7 +11,7 @@ vond **schaalbaar** en **modulair** het belangrijkst, dus:
 
 - de core blijft altijd hetzelfde, een nieuwe use case is alleen een `manifest.json`
 - het draait gewoon offline (één Docker-container, geen internet nodig)
-- per use case een simpele baseline vs. LightGBM, de beste wint
+- per use case een simpele baseline vs. LightGBM vs. een mix van de twee, de beste wint
 
 ## Wat zit waar
 
@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 191 tests, die draaien ook op GitHub Actions
+- 198 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -52,12 +52,13 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
 
 - **gesimuleerde kwekerij** op echt KNMI-weer 2016-2025, met een *antwoordmodel*: voor elk scenario weten we de echte uitkomst, dus we kunnen testen of de voorspelling klopt
 - **echte akkerbouwdata** (CBS + KNMI, 1999-2025), met een backtest: trainen tot 2020, testen op 2021-2025
-- **echte kasdata** (Autonomous Greenhouse Challenge van WUR, 6 kassen, dec 2019-mei 2020): stookenergie en
-  lampstroom per dag, getest op een kas die het model nooit gezien heeft (stroom R² 0.98, stoken R² 0.57)
+- **echte kasdata** (Autonomous Greenhouse Challenge van WUR, 12 kassen, komkommer 2018 + tomaat 2019-20):
+  stookenergie, lampstroom en **oogsttijd**, getest op de kassen van de echte telers die het model nooit zag.
+  Stoken per seizoen 2-6% naast de echte waarde, stroom 1-3%, oogsttijd ±2,3 dagen (1 graad warmer = 2,9 dagen eerder)
 - een kapotte versie van de kwekerijdata (vastgelopen sensor, pieken, verkeerde eenheden) voor later
 
 ```bash
-pip install -e '.[datasets]' && python scripts/make_greenhouse_challenge.py   # echte kasdata (8 MB download)
+pip install -e '.[datasets]' && python scripts/make_greenhouse_challenge.py   # echte kasdata (17 MB download)
 python scripts/make_nursery.py --faults && python scripts/make_arable.py && predictor train
 python scripts/check_scenarios.py   # klopt het model met het antwoordmodel?
 ```

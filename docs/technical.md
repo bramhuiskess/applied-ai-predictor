@@ -11,7 +11,7 @@ The prototype implements the design from the research (sub-questions 1 to 4):
 | SQ1 modular, model-agnostic architecture | Modular monolith with ports and adapters; use cases are `manifest.json` packages; architecture tests keep the core clean |
 | SQ2 data formats | JSON for requests/responses, JSONL for batches (streamed in bounded chunks), JSON Schema for validation |
 | SQ3 local vs. cloud | One Docker image that runs fully offline (`--network none`) and can be deployed to any cloud unchanged |
-| SQ4 model choice | Linear baseline vs. LightGBM per use case, Isolation Forest without labels, all exported to ONNX |
+| SQ4 model choice | Linear baseline vs. LightGBM vs. their average (blend) per use case, Isolation Forest without labels, all exported to ONNX |
 
 Included use cases:
 
@@ -48,7 +48,7 @@ python scripts/make_nursery.py && python scripts/make_arable.py   # scenario dat
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 191 tests, ~40 s, fully offline
+pytest                            # 198 tests, ~40 s, fully offline
 ```
 
 ### Technical notebook
@@ -190,7 +190,9 @@ an unknown category, or NaN/Infinity.
     "horizon_steps": null,                      // forecast the target N rows ahead
     "test_from": null,                          // backtest: rows from this date on are the test set ("2021-01-01")
     "test_group": null,                         // or hold out whole groups as the test set, e.g.
-                                                // {"column": "greenhouse", "values": ["Reference"]}
+                                                // {"column": "greenhouse", "values": ["Reference 2020"]};
+                                                // the model is then chosen by leaving each other group out
+                                                // in turn, and the simplest one within 1 standard error wins
     "target_min": null, "target_max": null,     // physical limits of the output (gas >= 0); predictions stay within
     "baseline": null,                           // a column that is a simple guess for the target, e.g.
                                                 // {"column": "yield_5y_avg", "label": "same as the last 5 years"}

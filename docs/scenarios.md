@@ -62,7 +62,7 @@ This already matters in the nursery gas model: the free linear baseline learned 
 because growers dose CO₂ in winter, exactly when they heat. That is a correlation, not an effect.
 On real greenhouse data the sign constraint also made the model *more accurate*: excluding the linear
 model there left a LightGBM with R² 0.18 on an unseen greenhouse; the sign-constrained linear model
-reaches 0.57 (see [datasets.md](datasets.md#4-real-greenhouse-data-autonomous-greenhouse-challenge-wur)).
+reaches 0.57. A blend of the two (their average) obeys declared effects too: the average of two functions that only go up also only goes up (see [datasets.md](datasets.md#4-real-greenhouse-data-autonomous-greenhouse-challenge-wur)).
 
 The result on test batches the models never saw:
 

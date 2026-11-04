@@ -1,0 +1,66 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "greenhouse-harvest-timing",
+  "description": "Days from flowering to harvest of real cherry-tomato trusses (Autonomous Greenhouse Challenge, WUR, 2019-2020), from the greenhouse temperature and light in the 39 days after flowering (the drivers of fruit development; CO₂ and humidity mainly affect fruit size). Answers: if I keep the greenhouse warmer from now on, how much sooner can I harvest? Tested on the compartment run by Dutch commercial growers.",
+  "data_source": {
+    "adapter": "csv-file",
+    "path": "data/greenhouse_harvests.csv"
+  },
+  "training": {
+    "target": "days_to_harvest",
+    "task": "regression",
+    "time_column": "flowering_date",
+    "target_min": 0,
+    "test_group": {
+      "column": "greenhouse",
+      "values": [
+        "Reference 2020"
+      ]
+    },
+    "units": {
+      "air_temp_c": "°C",
+      "light_mol_m2_day": "mol/m²/day",
+      "days_to_harvest": "days"
+    },
+    "drop_columns": [
+      "co2_ppm",
+      "humidity_pct"
+    ]
+  },
+  "model": {
+    "runner": "onnx",
+    "version": "latest"
+  },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  },
+  "scenario": {
+    "levers": {
+      "air_temp_c": {
+        "label": "Greenhouse temperature (24-hour mean)",
+        "unit": "°C",
+        "min": 17,
+        "max": 26,
+        "step": 0.5,
+        "effects": {
+          "days_to_harvest": "decreasing"
+        }
+      },
+      "light_mol_m2_day": {
+        "label": "Light (sun + lamps, inside)",
+        "unit": "mol/m²/day",
+        "min": 5,
+        "max": 40,
+        "step": 1
+      }
+    },
+    "outputs": {
+      "days_to_harvest": {
+        "label": "Days from flowering to harvest"
+      }
+    },
+    "case_label": "harvests"
+  }
+}

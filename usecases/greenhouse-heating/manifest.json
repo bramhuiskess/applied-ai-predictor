@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.0",
   "use_case_id": "greenhouse-heating",
-  "description": "Heating energy per m² per day of a real tomato greenhouse (Autonomous Greenhouse Challenge, WUR, 2019-2020).",
+  "description": "Heating energy per m² per day of real greenhouses (Autonomous Greenhouse Challenge, WUR): cucumber 2018 and tomato 2019-2020, 12 compartments. Tested on the two compartments run by Dutch commercial growers.",
   "data_source": {
     "adapter": "csv-file",
     "path": "data/greenhouse_days.csv"
@@ -12,7 +12,8 @@
     "time_column": "date",
     "target_min": 0,
     "drop_columns": [
-      "electricity_kwh_m2"
+      "electricity_kwh_m2",
+      "lamp_power_w_m2"
     ],
     "units": {
       "heat_setpoint_c": "°C",
@@ -25,7 +26,6 @@
       "radiation_j_cm2": "J/cm²/day",
       "wind_ms": "m/s",
       "outside_rh_pct": "%",
-      "season_day": "days",
       "heat_mj_m2": "MJ/m²",
       "rail_min_c": "°C",
       "grow_min_c": "°C"
@@ -33,7 +33,8 @@
     "test_group": {
       "column": "greenhouse",
       "values": [
-        "Reference"
+        "Reference 2018",
+        "Reference 2020"
       ]
     }
   },
