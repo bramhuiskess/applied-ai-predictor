@@ -145,6 +145,17 @@ class ScenarioOutput(_Strict):
     # Value of one unit of this output in euros, for comparing scenarios in money.
     # Positive for what you sell (a plant), negative for what you pay (a m3 of gas).
     value_eur: float | None = None
+    # Or take the price per unit from an input of the same row (the grower's own gas price).
+    price_from: str | None = None
+    is_cost: bool = False  # with price_from: the output costs money instead of earning it
+
+    @model_validator(mode="after")
+    def _one_price(self) -> ScenarioOutput:
+        if self.value_eur is not None and self.price_from:
+            raise ValueError("give either 'value_eur' or 'price_from', not both")
+        if self.is_cost and not self.price_from:
+            raise ValueError("'is_cost' goes with 'price_from' (with value_eur, use a negative value for a cost)")
+        return self
 
 
 class ScenarioConfig(_Strict):
@@ -186,9 +197,11 @@ class Manifest(_Strict):
                 if output not in t.outputs:
                     raise ValueError(f"scenario.levers.{name}.effects: unknown output {output!r} "
                                      f"(outputs: {', '.join(t.outputs)})")
-        for output in self.scenario.outputs:
+        for output, config in self.scenario.outputs.items():
             if output not in t.outputs:
                 raise ValueError(f"scenario.outputs: unknown output {output!r} (outputs: {', '.join(t.outputs)})")
+            if config.price_from and config.price_from in t.outputs:
+                raise ValueError(f"scenario.outputs.{output}.price_from: {config.price_from!r} is an output, not an input")
         return self
 
     @field_validator("manifest_version")

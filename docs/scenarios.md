@@ -9,8 +9,8 @@ used. This document grows with the scenario tickets.
 | 1. Datasets for testing | done, see [datasets.md](datasets.md) |
 | 2. Scenario variables in manifest.json | done |
 | 3. Scenario input | done |
-| 4. Calculate a scenario | **done** |
-| 5. Difference base vs. scenario | |
+| 4. Calculate a scenario | done |
+| 5. Difference base vs. scenario | **done** |
 
 ## Scenario variables in `manifest.json` (ticket 2)
 
@@ -27,7 +27,7 @@ where it always holds, in which direction a lever moves an output:
     }
   },
   "outputs": {
-    "gas_m3": { "label": "Gas use", "value_eur": -0.45 }   // positive = you sell it, negative = you pay for it
+    "gas_m3": { "label": "Gas use", "price_from": "gas_price_eur_m3", "is_cost": true }   // or "value_eur": -0.45
   }
 }
 ```
@@ -78,7 +78,8 @@ input for ticket 4.
       "min": 0, "max": 18, "step": 0.5, "effects": { "gas_m3": "decreasing" },
       "training_range": [0, 18], "beyond_training_data": false }
   ],
-  "outputs": [ { "name": "gas_m3", "label": "Gas use", "unit": "m³", "value_eur": -0.45 } ],
+  "outputs": [ { "name": "gas_m3", "label": "Gas use", "unit": "m³", "value_eur": null,
+                 "price_from": "gas_price_eur_m3", "is_cost": true, "margin": 3027.1 } ],
   "constraints": { "effects": { "light_hours": "decreasing", "co2_ppm": "decreasing", "plant_density_m2": "decreasing" },
                    "excluded_candidates": { "linear_regression": ["co2_ppm should be decreasing but the model says increasing"] } }
 }
@@ -180,8 +181,54 @@ greenhouse warm anyway), the model still invents one, about a week for harvest t
 normal gas level (before the output limits this was up to 51%). The test suite guards this so it cannot get
 silently worse. Better features for the season are input for later work.
 
+## Difference base vs. scenario (ticket 5)
+
+Every calculated scenario (`POST /models/{id}/scenario`) now says what changes, in a way a grower can act on:
+
+```jsonc
+{ "name": "1 degree warmer",
+  "difference": { "gas_m3": { "base": 25337.2, "scenario": 20127.5, "change": -5209.7, "change_pct": -20.56,
+                              "eur": 2292.27, "margin": 3027.1, "exceeds_margin": true } },
+  "net_eur": 2292.27,
+  "summary": "1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292)." }
+```
+
+- **Units and %**: `change` and `change_pct` (no percentage when the base is 0).
+- **Money**: per output either a fixed `value_eur` per unit (plants: €2.10), or `price_from` an input of
+  the same row with `is_cost` (gas at the grower's own gas price, which is a model input anyway).
+  Positive euros are always good for the grower: more income or lower costs. `net_eur` adds up all priced outputs.
+- **Margin of error**: `margin` is the model's typical error on one prediction (MAE on the test set).
+  A change smaller than that is reported as "within the model's typical error, so treat it as no clear effect".
+- **Summary**: one sentence per scenario, for people who do not read JSON.
+- **Sweeps** get the same `difference` per point, so a client can draw the change, not only the level.
+- **Classification** outputs compare the chance of the "yes" class (e.g. "the chance of failure = 1 goes from 10% to 65%").
+
+### Can you trust the verdict? (the answer key)
+
+`python scripts/check_scenarios.py --verdicts` runs ±1 °C, +2 h light, +200 ppm CO₂ and +5 plants/m²
+through the real scenario engine for every unseen test batch and checks each verdict against the simulator:
+
+| Output | "Clear effect": direction right | "Within the margin": the true effect is small too |
+|---|---|---|
+| Weeks to harvest | **95.7%** (140 cases) | **93.7%** (521 cases) |
+| Plants sold | **98.2%** (114) | **95.1%** (547) |
+| Gas | **91.4%** (35) | **89.8%** (626) |
+
+When the engine says "clear effect", it is almost always right; when it says "within the margin", the
+real effect is indeed small in ~90% of cases. The rule is cautious on purpose: some real but small effects
+(e.g. harvest weeks) are reported as uncertain. The test suite checks the "clear effect" direction against
+the answer key.
+
+**Limitations**
+- Money only counts outputs that have a model in this use case. "More lamp light" saves gas, but the
+  lamps' electricity is not counted until there is an electricity model (`electricity_kwh` is in the nursery data).
+- Combining several outputs (plants *and* gas) in one scenario needs the multi-output ticket; `outputs`,
+  `difference` and `net_eur` are already keyed by output so they work unchanged then.
+- The margin is the error of one prediction. The error of a *difference* between two predictions of the same
+  batch is usually smaller, so the rule errs on the side of caution.
+
 ### Not in this ticket
 
 - Several outputs in one use case (the multi-output tickets): `outputs` and `effects` are already
   keyed by output name, so they work unchanged once a use case has more than one target.
-- The difference between base and scenario, in money and with the margin of error (ticket 5).
+- A scenario panel in the dashboard (frontend).

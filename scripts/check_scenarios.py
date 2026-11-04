@@ -111,6 +111,48 @@ def compare_sweeps(nursery, batches: list[dict], df: pd.DataFrame, service, test
     return pd.DataFrame(out)
 
 
+VERDICT_SCENARIOS = {"+1 °C": ("temp_setpoint_c", 1.0), "-1 °C": ("temp_setpoint_c", -1.0),
+                     "+2 h light": ("light_hours", 2.0), "+200 ppm CO2": ("co2_ppm", 200.0),
+                     "+5 plants/m2": ("plant_density_m2", 5.0)}
+
+
+def compare_verdicts(nursery, batches: list[dict], df: pd.DataFrame, service, test_from: str) -> pd.DataFrame:
+    """Is the margin rule of ticket 5 trustworthy? Verdicts from the real engine vs. the answer key."""
+    by_id = {b["batch_id"]: b for b in batches}
+    test = df[df["start_date"] >= test_from]
+    rows = []
+    for output, use_case in MODELS.items():
+        info = service.describe(use_case)
+        order = info["feature_schema"]["x-feature-order"]
+        levers = {l["name"]: l for l in info["scenario"]["levers"]}
+        for _, row in test.iterrows():
+            features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+            requested = []
+            for name, (lever, delta) in VERDICT_SCENARIOS.items():
+                new = features[lever] + delta
+                if lever == "light_hours" and row["lamp_type"] == "none":
+                    continue
+                if levers[lever]["min"] <= new <= levers[lever]["max"]:
+                    requested.append({"name": name, "changes": {lever: {"delta": delta}}})
+            body = service.run_scenarios(use_case, {"features": features}, requested)
+            b = by_id[row["batch_id"]]
+            base_true = nursery.simulate(b)[output]
+            for s in body["scenarios"]:
+                lever, delta = VERDICT_SCENARIOS[s["name"]]
+                true = nursery.counterfactual(b, **{lever: b[lever] + delta})[output] - base_true
+                d = s["difference"][output]
+                rows.append({"output": output, "clear": d["exceeds_margin"],
+                             "same_direction": np.sign(round(d["change"], 6)) == np.sign(round(true, 6)),
+                             "truth_small": abs(true) < d["margin"]})
+    r = pd.DataFrame(rows)
+    out = []
+    for (output, clear), g in r.groupby(["output", "clear"]):
+        out.append({"output": output, "verdict": "clear effect" if clear else "within margin", "cases": len(g),
+                    "right_direction_pct": 100 * g["same_direction"].mean(),
+                    "truth_also_small_pct": 100 * g["truth_small"].mean()})
+    return pd.DataFrame(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--weather", choices=["knmi", "synthetic"], default="knmi")
@@ -119,6 +161,7 @@ def main() -> None:
     parser.add_argument("--json", type=Path, default=None)
     parser.add_argument("--sweeps", action="store_true", help="also compare whole lever sweeps (slower)")
     parser.add_argument("--sample", type=int, default=60, help="test batches used for --sweeps")
+    parser.add_argument("--verdicts", action="store_true", help="check the margin rule (clear effect or not)")
     args = parser.parse_args()
 
     daily = (knmi.load_daily(nursery_mod.STATION, "2015-06-01", nursery_mod.END) if args.weather == "knmi"
@@ -133,6 +176,10 @@ def main() -> None:
     print(result.round(1).to_string(index=False))
     if args.json:
         args.json.write_text(result.to_json(orient="records", indent=2), encoding="utf-8")
+    if args.verdicts:
+        verdicts = compare_verdicts(nursery, batches, df, bootstrap.build_service(), test_from)
+        print("\nverdicts of the scenario engine vs. the answer key\n")
+        print(verdicts.round(1).to_string(index=False))
     if args.sweeps:
         sweeps = compare_sweeps(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
         print("\nwhole-range sweeps through the scenario engine vs. the true curves\n")
