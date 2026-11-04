@@ -122,6 +122,35 @@ def build(yields: pd.DataFrame, weather: dict[str, pd.DataFrame]) -> pd.DataFram
     return pd.DataFrame(rows).sort_values(["season", "crop", "province"]).reset_index(drop=True)
 
 
+# Columns that come from the weather table once the data is split (see split_tables). The other weather
+# columns (rain deficit, hot/frost/wet days, early-season rain) need conditional counts or calendar-month
+# offsets that the manifest joins do not have yet, so they stay in the base table.
+JOINED_COLUMNS = ["season_temp_c", "season_rain_mm", "season_radiation_mj_m2"]
+SEASONS = {name: (first, last) for name, first, last in CROPS.values()}
+
+
+def split_tables(df: pd.DataFrame, weather: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """The same data as separate tables, to be connected again by the join in the manifest.
+
+    * base: one row per crop/province/year, plus the dates of that crop's growing season;
+    * weather: daily KNMI values per province (key join on ``province``, window = the growing season).
+    """
+    base = df.drop(columns=JOINED_COLUMNS).copy()
+    first = base["crop"].map(lambda crop: SEASONS[crop][0])
+    last = base["crop"].map(lambda crop: SEASONS[crop][1])
+    start = pd.to_datetime(pd.DataFrame({"year": base["year"], "month": first, "day": 1}))
+    end = pd.to_datetime(pd.DataFrame({"year": base["year"], "month": last, "day": 1})) + pd.offsets.MonthEnd(0)
+    base["season_start"] = start.dt.strftime("%Y-%m-%d")
+    base["season_end"] = end.dt.strftime("%Y-%m-%d")
+    daily = []
+    for province, table in weather.items():
+        part = table[["date", "temp_mean_c", "rain_mm", "radiation_j_cm2"]].copy()
+        part["date"] = part["date"].dt.strftime("%Y-%m-%d")
+        part.insert(0, "province", province)
+        daily.append(part)
+    return {"base": base, "weather": pd.concat(daily, ignore_index=True)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=Path("data/arable.csv"))
@@ -132,6 +161,9 @@ def main() -> None:
     df = build(yields, weather)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, index=False)
+    tables = split_tables(df, weather)
+    tables["base"].to_csv(args.out.with_name(args.out.stem + "_base.csv"), index=False)
+    tables["weather"].to_csv(args.out.with_name("weather_provinces.csv"), index=False)
     print(f"wrote {args.out}: {len(df)} rows, {df['year'].min()}-{df['year'].max()}, "
           f"{df['crop'].nunique()} crops x {df['province'].nunique()} provinces")
 

@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import predictor.core.certainty as certainty_module
+from conftest import repoint_nursery, write_nursery_tables
 from predictor import bootstrap
 from predictor.core.certainty import SupportIndex, build_support, certainty
 from predictor.trainer.run import train_use_case
@@ -145,11 +146,11 @@ def test_no_certainty_without_the_map(kas):
 
 def test_higher_certainty_means_a_smaller_error_in_the_effect(tmp_path):
     """Sweeps through the real engine on unseen batches, against the simulator's true effects."""
-    df, sim, batches = make_nursery.generate(knmi.synthetic_daily("2015-06-01", "2025-12-31", seed=7),
-                                             compartments=10, seed=13)
-    df.to_csv(tmp_path / "nursery.csv", index=False)
+    daily = knmi.synthetic_daily("2015-06-01", "2025-12-31", seed=7)
+    df, sim, batches = make_nursery.generate(daily, compartments=10, seed=13)
+    write_nursery_tables(tmp_path, df, daily, sim)
     manifest = json.loads((ROOT / "usecases" / "nursery-harvest-weeks" / "manifest.json").read_text())
-    manifest["data_source"]["path"] = str(tmp_path / "nursery.csv")
+    repoint_nursery(manifest, tmp_path)
     train_use_case(write(tmp_path, manifest), bootstrap.build_registry(tmp_path / "models"))
     client = TestClient(bootstrap.build_app(tmp_path / "usecases", tmp_path / "models"))
     order = client.get("/models/nursery-harvest-weeks").json()["feature_schema"]["x-feature-order"]

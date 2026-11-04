@@ -10,6 +10,8 @@ need data in which the **cause and effect is known**, plus real data to keep us 
 | `nursery_truth.json` | Same simulator | 5 scenarios | The answer key: average true effect of +1 °C, +2 h light, +200 ppm CO₂, +0.3 EC, +5 plants/m² |
 | `nursery_faulty.csv` + `.faults.json` | Same data with injected problems | 711 + duplicates | Later ticket "what does the system do with bad data": stuck sensor, spikes, missing values, kWh-instead-of-m³, duplicate rows, each logged |
 | `arable.csv` | **Real**: CBS 85636NED yields + KNMI daily weather per province | 1,448 (5 crops × 12 provinces × 1999-2025) | Reality check on public data, backtest exactly as the client proposed: train up to 2020, test 2021-2025 |
+| `nursery_base.csv` + `compartments.csv` + `weather_rotterdam.csv` | The nursery data as **separate tables** | 711 + 16 + daily 2015-2025 | What the nursery manifests actually read: the weather window and the compartment attributes are joined in the manifest (see below) |
+| `arable_base.csv` + `weather_provinces.csv` | The arable data as separate tables | 1,448 + daily per province | `arable-yield` joins the season temperature, rain and radiation from the daily weather of its province |
 
 ```bash
 python scripts/make_nursery.py --faults      # ~4 s, downloads KNMI Rotterdam once
@@ -17,6 +19,14 @@ python scripts/make_arable.py                # ~4 s, downloads CBS + 12 KNMI sta
 predictor train                              # trains all use cases, incl. the 4 new ones
 python scripts/check_scenarios.py            # model vs. answer key on unseen batches
 ```
+
+**Connected tables.** `nursery.csv` and `arable.csv` stay as they are (the answer key, the plots and the metrics
+comparison use them), but the use cases train on the split tables and connect them with `joins` in the manifest
+([technical docs](technical.md#joining-datasets)). The join reproduces the old columns **exactly** (largest difference
+0.0 for all eight columns); `predictor train` gives the same metrics for `arable-yield` and `nursery-harvest-weeks`, and a
+0.04% different MAE for `nursery-gas` (the joined columns now come last, which changes LightGBM's tie-breaking). Five of the
+arable weather columns (rain deficit, hot/frost/wet days, early-season rain) are still in the base table: they need
+conditional counts and calendar-month windows that joins do not have yet.
 
 Downloads are cached in `data/raw/` (git-ignored); after the first run everything works offline.
 The tests use synthetic weather (`knmi.synthetic_daily`), so CI never needs the internet.

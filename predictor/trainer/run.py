@@ -21,6 +21,7 @@ from predictor.core.manifest import MANIFEST_FILENAME, Manifest, load_manifest
 from predictor.trainer import models
 from predictor.trainer.export import check_parity, make_thresholds_float32_safe, to_onnx
 from predictor.trainer.errors import TrainingError
+from predictor.trainer.join import apply_joins
 from predictor.trainer.profile import build_feature_schema, detect_task, prepare
 
 ARTIFACT_NAME = "model.onnx"
@@ -39,7 +40,18 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     adapter = manifest.data_source.adapter if data_path is None else adapter_for(source)
     df = read_table(adapter, source)
 
+    # Joins run first, on the raw base columns (before rename_columns): lookup tables become ordinary columns.
+    base_rows = len(df)
+    joined = None
+    if manifest.joins:
+        joined = apply_joins(manifest, df)
+        df = joined.df
+        if joined.consumed:  # dates that only place a window are join inputs, not model features
+            cfg = cfg.model_copy(update={"drop_columns": [*cfg.drop_columns, *joined.consumed]})
+
     data = prepare(df, cfg, manifest.policy)
+    if joined:
+        data.notes[:0] = joined.notes
     task = data.task
     feature_names = [f.name for f in data.features]
     monotone = _scenario_constraints(manifest, data)
@@ -157,7 +169,9 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
                                          split.test, manifest.policy.evaluation_rows_allowed),
         "notes": data.notes,
-        "dataset": {"path": str(source), "rows": int(len(df)), "sha256": _sha256(source)},
+        "dataset": {"path": str(source), "rows": base_rows, "sha256": _sha256(source),
+                    **({"rows_after_joins": int(len(df))} if joined else {})},
+        "joins": joined.summary if joined else [],
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "environment": _environment(),
     }
@@ -188,7 +202,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         feature_schema=schema,
         artifact_name=ARTIFACT_NAME,
         artifact=artifact,
-        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2), **support_file},
+        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2), **support_file,
+                     **(joined.engine.snapshot() if joined and joined.engine else {})},
     )
     report_path = registry.root / manifest.use_case_id / version / "report.md"
     report_path.write_text(render_report(manifest, {**descriptor, "model_version": version}), encoding="utf-8")
@@ -290,6 +305,7 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
            else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
         "",
+        *_joins_section(d.get("joins")),
         "## Candidates (test split)",
         "",
     ]
@@ -344,6 +360,27 @@ def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, 
     metrics = {k: float(np.mean([f[k] for f in folds])) for k in folds[0]}
     metrics.update({f"{k}_se": float(np.std([f[k] for f in folds], ddof=1) / np.sqrt(len(folds))) for k in folds[0]})
     return metrics
+
+
+def _joins_section(joins: list[dict[str, Any]] | None) -> list[str]:
+    """What was connected to the base table, and how well it matched (empty without joins)."""
+    if not joins:
+        return []
+    lines = ["## Joins", "", "| join | lookup | connected by | new columns | matched | dropped |", "|---|---|---|---|---|---|"]
+    for j in joins:
+        by = ", ".join(f"{b} = {k}" for b, k in j["keys"].items())
+        if j.get("window"):
+            w = j["window"]
+            edge = lambda e: (e["column"] or j["time"]["base"]) + (f" {e['offset']:+d} {e['unit']}" if e["offset"] else "")
+            by = (by + "; " if by else "") + f"window [{edge(w['start'])}, {edge(w['end'])})"
+        matched = f"{j['matched']:.1%}" if "matched" in j else "-"
+        lines.append(f"| `{j['name']}` | `{j['source']}` ({j['lookup_rows']} rows) | {by} | "
+                     f"{', '.join(f'`{c}`' for c in j['columns'])} | {matched} | {j.get('dropped_rows', 0)} |")
+    for j in joins:
+        lines += [f"- {j['name']}: {m}" for m in j.get("warnings", [])]
+    lines += ["", "At prediction time the service derives these columns from the same lookup tables (snapshot stored with "
+              "the model); a value sent by the caller wins.", ""]
+    return lines
 
 
 def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_index,

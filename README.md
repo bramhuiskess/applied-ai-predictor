@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 198 tests, die draaien ook op GitHub Actions
+- 315 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -75,6 +75,25 @@ Elk scenario zegt ook hoeveel vergelijkbare gevallen er in de historie zijn. Bij
 gevallen is de voorspelling 3 tot 4 keer minder nauwkeurig, en dat zie je dan ook staan.
 
 Zie [`docs/scenarios.md`](docs/scenarios.md).
+
+## Meerdere datasets koppelen
+
+Het weer en de eigenschappen van een kas hoeven niet meer in het CSV-bestand te zitten: in het manifest geef je onder
+`joins` aan welke tabellen aan de basistabel hangen (op sleutel, op een tijdvenster, of allebei). Bijvoorbeeld "het gemiddelde
+weer in de 10 weken na `start_date`":
+
+```jsonc
+"joins": [{ "name": "weather", "source": { "adapter": "csv-file", "path": "data/weather_rotterdam.csv" },
+            "time": { "base": "start_date", "lookup": "date" },
+            "window": { "start": { "offset": 0 }, "end": { "offset": 10, "unit": "weeks" } },
+            "aggregate": { "outside_temp_avg_c": { "column": "temp_mean_c", "op": "mean" } } }]
+```
+
+- `predictor train` controleert de sleutels eerst (typfout, dubbele rijen, ontbrekende data) en `predictor check-joins` doet dat zonder te trainen
+- de service vult de gekoppelde kolommen zelf in: stuur `start_date` en `compartment` mee in plaats van het weer; een waarde die je zelf meestuurt wint
+- komt het venster buiten de data (volgend jaar), dan kan het manifest kiezen voor het gemiddelde van dezelfde periode in andere jaren, met een waarschuwing
+
+Zie [`docs/technical.md`](docs/technical.md#joining-datasets).
 
 ## Nog te doen
 

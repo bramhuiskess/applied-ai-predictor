@@ -43,6 +43,26 @@ def pump_data(n: int = 1500, seed: int = 7) -> pd.DataFrame:
     })
 
 
+def write_nursery_tables(root: Path, df: pd.DataFrame, daily: pd.DataFrame, sim) -> None:
+    """Write nursery.csv (everything) plus the split tables the real nursery manifests join."""
+    import make_nursery
+
+    root.mkdir(parents=True, exist_ok=True)
+    df.to_csv(root / "nursery.csv", index=False)
+    tables = make_nursery.split_tables(df, daily, sim)
+    tables["base"].to_csv(root / "nursery_base.csv", index=False)
+    tables["compartments"].to_csv(root / "compartments.csv", index=False)
+    tables["weather"].to_csv(root / "weather.csv", index=False)
+
+
+def repoint_nursery(manifest: dict, root: Path) -> dict:
+    """Point a real nursery manifest (base table + joins) at the files of write_nursery_tables."""
+    manifest["data_source"]["path"] = str(root / "nursery_base.csv")
+    for join in manifest.get("joins", []):
+        join["source"]["path"] = str(root / ("compartments.csv" if join["name"] == "compartment" else "weather.csv"))
+    return manifest
+
+
 def write_manifest(usecases: Path, manifest: dict) -> Path:
     directory = usecases / manifest["use_case_id"]
     directory.mkdir(parents=True, exist_ok=True)

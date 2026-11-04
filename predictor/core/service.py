@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
 from predictor.core.certainty import SupportIndex, certainty
-from predictor.core.manifest import Manifest
+from predictor.core.manifest import Manifest, ManifestError
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
 from predictor.core.scenario import (
@@ -88,6 +88,7 @@ class PredictionService:
             if model is not None:
                 check_schema(manifest.use_case_id, manifest.policy, model.feature_schema)
                 check_scenario(manifest.use_case_id, manifest.scenario, model.feature_schema)
+                _check_joined_levers(manifest, model)
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
@@ -132,9 +133,11 @@ class PredictionService:
                     "allowed_values": schema["properties"][name].get("enum"),
                     "unit": schema["properties"][name].get("x-unit"),
                     "training_range": schema["properties"][name].get("x-observed-range"),
+                    **_derived_info(uc, name),
                 }
                 for name in schema["x-feature-order"]
             ],
+            "joins": _describe_joins(uc),
             "policy": uc.manifest.policy.model_dump(),
             "scenario": describe_scenario(uc.manifest.scenario, schema, descriptor),
             "feature_schema": schema,
@@ -253,9 +256,18 @@ class PredictionService:
             errors = check_record(uc.manifest.policy, row)
             return (errors, []) if errors else uc.validator.validate(row)
 
+        # The base is enriched once (joined columns from the lookup tables); every scenario starts from that
+        # row, so a lever change is never overwritten by a join. The policy sees the raw request first.
+        raw_errors = check_record(uc.manifest.policy, features)
+        features, join_errors, join_warnings = _enrich(uc, features)
+        problems = raw_errors or join_errors
+        if problems:
+            raise RequestRejected([{"scenario": None, "field": e.field, "message": e.message} for e in problems],
+                                  detail="invalid scenario request")
         resolved, errors = resolve_scenarios(uc.manifest.scenario, uc.model.feature_schema, features, scenarios, validate)
         if errors:
             raise RequestRejected(errors, detail="invalid scenario request")
+        resolved.base_warnings[:0] = join_warnings
         return resolved
 
     def _outputs(self, uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -362,8 +374,14 @@ class PredictionService:
         if errors:
             # Policy violations are reported before anything else touches the data.
             return _Checked(record_id, features, errors, [])
+        features, join_errors, join_warnings = _enrich(uc, features)
+        if join_errors:
+            return _Checked(record_id, features, join_errors, [])
+        errors = check_record(uc.manifest.policy, features)  # e.g. a group size that was joined in
+        if errors:
+            return _Checked(record_id, features, errors, [])
         errors, warnings = uc.validator.validate(features)
-        return _Checked(record_id, features, errors, warnings)
+        return _Checked(record_id, features, errors, [*join_warnings, *warnings])
 
     def _run(self, uc: UseCase, checked: list[_Checked]) -> list[dict[str, Any]]:
         matrix = uc.validator.to_matrix([c.features for c in checked])
@@ -414,3 +432,40 @@ class PredictionService:
             model_version=uc.model.version if uc.model else None,
             features=features,
         )
+
+
+# ------------------------------------------------------------------------------ joined inputs
+
+def _enrich(uc: UseCase, features: Any) -> tuple[Any, list[FieldError], list[str]]:
+    """Fill the columns the model was trained with from lookup tables (no-op without joins or for non-objects)."""
+    joins = uc.model.joins if uc.model else None
+    if joins is None or not isinstance(features, dict):
+        return features, [], []
+    return joins.enrich_record(features, set(uc.validator.feature_order))
+
+
+def _check_joined_levers(manifest: Manifest, model: LoadedModel) -> None:
+    if model.joins is None or manifest.scenario is None:
+        return
+    for lever in manifest.scenario.levers:
+        if lever in model.joins.derived:
+            raise ManifestError(f"{manifest.use_case_id}: scenario lever {lever!r} is calculated by join "
+                                f"{model.joins.derived[lever]!r}, so it cannot be changed; change its inputs instead")
+
+
+def _derived_info(uc: UseCase, name: str) -> dict[str, Any]:
+    joins = uc.model.joins
+    if joins is None or name not in joins.derived:
+        return {}
+    return {"derived_by": joins.derived[name], "required": False}
+
+
+def _describe_joins(uc: UseCase) -> list[dict[str, Any]]:
+    """For clients: which inputs can be sent instead of the joined columns."""
+    joins = uc.model.joins
+    if joins is None:
+        return []
+    features = set(uc.model.feature_schema["properties"])
+    trained = {j["name"]: j for j in uc.model.descriptor.get("joins", [])}
+    return [{"name": j.name, "accepts": j.base_inputs, "fills": [c for c in j.new_columns if c in features],
+             "fallback": j.fallback, "lookup_rows": trained.get(j.name, {}).get("lookup_rows")} for j in joins.joins]

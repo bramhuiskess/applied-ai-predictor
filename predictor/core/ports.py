@@ -7,9 +7,12 @@ the filesystem, CSV files) lives in ``predictor.adapters`` (Cockburn, 2005).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from predictor.core.joins import JoinEngine
 
 
 @dataclass
@@ -38,6 +41,7 @@ class LoadedModel:
     feature_schema: dict[str, Any]
     runner: ModelRunner
     support: dict[str, Any] | None = None  # map of the training data, for "comparable cases"
+    joins: JoinEngine | None = None  # lookup tables the model was trained with, to fill joined inputs
 
     @property
     def version(self) -> str:
