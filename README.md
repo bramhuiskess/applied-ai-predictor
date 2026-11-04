@@ -34,7 +34,7 @@ docker run --rm -p 8000:8000 applied-ai-predictor
 Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
 http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
-Zonder Docker kan ook, zie [`docs/technical.md`](docs/technical.md).
+Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/technical.md`](docs/technical.md).
 
 ## Wat kan het nu
 
