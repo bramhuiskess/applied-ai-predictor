@@ -112,7 +112,67 @@ That is a useful outcome, not a failure:
 
 ![Dashboard showing the honest result](img/dashboard_arable_honest.png)
 
-## 4. Improvements to the pipeline found while doing this
+## 4. Real greenhouse data: Autonomous Greenhouse Challenge (WUR)
+
+The arable data showed that regional averages are not enough. So we went looking for **real
+greenhouse data with the levers a grower turns**, and found the
+[Autonomous Greenhouse Challenge, 2nd edition](https://doi.org/10.4121/uuid:88d22c60-21b3-4ea8-90db-20249a5be2a7)
+(Wageningen UR, CC0): six high-tech compartments in Bleiswijk, cherry tomatoes, December 2019 to May 2020.
+One compartment was run by Dutch commercial growers ("Reference"), five by AI teams. The climate computer
+logs every 5 minutes; heating energy and electricity are booked per day.
+
+```bash
+pip install -e '.[datasets]'                     # py7zr, the data is a .7z archive (8 MB)
+python scripts/make_greenhouse_challenge.py      # -> data/greenhouse_days.csv, 996 greenhouse-days
+predictor train greenhouse-heating && predictor train greenhouse-electricity
+```
+
+One row = one compartment on one day: the grower's settings (heating and ventilation temperature,
+minimum pipe temperatures, lamp hours, energy screen, CO₂), the weather, and the cost (heating
+energy MJ/m², lamp electricity kWh/m²). Two use cases, both with scenario levers and euros
+(heat 0.0083 €/MJ, electricity 0.065 €/kWh: the challenge's own tariffs):
+
+| Use case | Target | Test: the growers' compartment, never seen in training | |
+|---|---|---|---|
+| `greenhouse-electricity` | lamp electricity | typical error 0.07 kWh/m² (4%), **R² 0.98** | 1 lamp hour = 0.136 kWh/m²; measured lamp power 135 W/m² |
+| `greenhouse-heating` | heating energy | typical error 0.62 MJ/m² (22%), **R² 0.57** | +1 °C = +0.31 MJ/m² per day (+17%) |
+
+![The unseen greenhouse: actual vs. predicted](img/real_greenhouse_unseen.png)
+
+**How we tested.** One season is too short for a chronological test: training on December-March and
+testing on April-May gave R² −0.59, because trees cannot extrapolate to warmer weather than they saw.
+The question a grower asks is different anyway: *does it work for my greenhouse?* So the new
+`training.test_group` holds out a whole compartment as the test set. In a leave-one-greenhouse-out
+round (each compartment once the test set) heating has a median R² of 0.57; the worst is Automatoes
+(R² −1.7), the team that ran a ventilation temperature of 30.7 °C on average (others: 21-23 °C), a
+strategy no other compartment used.
+
+**No answer key, so we check against physics.**
+
+![Effects vs. physics](img/real_greenhouse_physics.png)
+
+- electricity per lamp hour: right (0.136 vs. measured 0.135 kWh/m²)
+- +1 °C heating temperature: 0.31 MJ/m² per day, which fits a screened glass greenhouse (U ≈ 3.6 W/m²K)
+- lamp heat saving: right direction, **far too small** (0.06 vs. 0.2-0.4 MJ/m² per lamp hour). Lamps burn
+  on the cold, dark days, so in the data "more lamp hours" comes with "more heating". In euros this
+  matters little: an extra lamp hour costs €0.0088/m² in electricity, the missing heat saving is
+  about €0.002/m².
+
+**What we found doing this**
+
+- Declaring "higher minimum grow-pipe temperature = more heating" excluded the linear model, because
+  in this data that coefficient came out negative (it moves together with the rail-pipe temperature).
+  The remaining LightGBM had R² 0.18 on the unseen greenhouse. Fix: the linear model is now fitted
+  *with* the sign constraints; the grow-pipe effect is held at 0 and reported. R² back to 0.57.
+- More model tuning did not help heating; more and more varied data does. Six compartments in one
+  season are too few to cover every strategy (see Automatoes). A grower's own multi-year history is
+  what would make this reliable.
+
+This script is specific to this dataset (it aggregates the 5-minute logs to days and joins three
+files). Generic aggregation, sensor preparation and joining datasets on time are separate team
+tickets; the script can be replaced by them later.
+
+## 5. Improvements to the pipeline found while doing this
 
 | Problem found | Fix | Effect |
 |---|---|---|
@@ -120,9 +180,11 @@ That is a useful outcome, not a failure:
 | ONNX parity check used a fixed absolute tolerance (0.0001); outputs like gas in m³ (up to 100,000) failed on harmless float32 rounding | Tolerance scales with the size of the output | Large real-world quantities can be trained |
 | No way to backtest on a fixed period | `training.test_from` | Exact "train ≤ 2020, test 2021-2025" splits |
 | "Better than a simple guess" only existed for 1-step forecasts, and showed negative percentages when the model lost | `training.baseline` + honest dashboard wording | The system admits when it adds no value |
+| One season of real data: a chronological test only measures "can it extrapolate to May" | `training.test_group` holds out whole greenhouses | Tests what a grower asks: does it work for *my* greenhouse? |
+| Declared effects threw out the best model on real data (one coefficient had the wrong sign) | Linear model fitted with sign constraints; unsupported effects held at 0 and reported | Real heating R² 0.18 → 0.57 on an unseen greenhouse |
 | pandas 3 stores dates in microseconds; interpolating on nanoseconds silently froze the gas price | Explicit conversion + a test on the 2022 crisis | Caught by our own sanity check |
 
-## 5. Questions for the grower (12 November)
+## 6. Questions for the grower (12 November)
 
 To calibrate the simulator, and later to replace it with his own data:
 

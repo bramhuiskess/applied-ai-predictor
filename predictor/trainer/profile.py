@@ -40,6 +40,7 @@ class PreparedData:
     chronological: bool
     notes: list[str] = field(default_factory=list)
     times: pd.Series | None = None  # time each target value refers to (for charts)
+    groups: pd.Series | None = None  # test_group column, for holding out whole groups
 
 
 def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedData:
@@ -54,7 +55,9 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         )
 
     baseline_column = cfg.baseline.column if cfg.baseline else None
-    missing = [c for c in [*cfg.drop_columns, cfg.target, cfg.time_column, cfg.evaluation_label, baseline_column]
+    group_column = cfg.test_group.column if cfg.test_group else None
+    missing = [c for c in [*cfg.drop_columns, cfg.target, cfg.time_column, cfg.evaluation_label, baseline_column,
+                           group_column]
                if c and c not in df.columns]
     if missing:
         raise TrainingError(f"column(s) {missing} named in the manifest are not in the dataset {list(df.columns)}")
@@ -117,6 +120,10 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
     evaluation_label = None
     if cfg.evaluation_label:
         evaluation_label = df.pop(cfg.evaluation_label).reset_index(drop=True)
+    groups = None
+    if group_column:
+        # Only used to split; never an input, or the model would just learn each group.
+        groups = df.pop(group_column).astype(str).reset_index(drop=True)
 
     specs, X = _profile_features(df, notes)
     if not specs:
@@ -142,7 +149,7 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         raise TrainingError(f"only {len(X)} usable rows; at least 50 are needed")
 
     return PreparedData(X, y, specs, task, target_name, classes, evaluation_label, persistence, chronological,
-                        notes, times)
+                        notes, times, groups)
 
 
 def detect_task(target: pd.Series) -> str:

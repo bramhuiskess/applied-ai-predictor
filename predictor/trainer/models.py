@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier, LGBMRegressor
+from scipy.optimize import lsq_linear
 from sklearn.ensemble import IsolationForest
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -42,12 +43,20 @@ class Split:
 
 
 def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.Series | None,
-               test_start: int | None = None) -> Split:
+               test_start: int | None = None, test_mask: np.ndarray | None = None) -> Split:
     """train / validation / test. Time-ordered data is split chronologically to avoid leakage.
 
     `test_start` (rows are sorted by time) fixes where the test set begins, for backtests.
     """
     index = np.arange(n)
+    if test_mask is not None:
+        # Whole groups are the test set; the rest is split into train and validation.
+        rest, test = index[~test_mask], index[test_mask]
+        if chronological:
+            n_val = int(round(len(rest) * 0.2))
+            return Split(rest[: len(rest) - n_val], rest[len(rest) - n_val:], test)
+        train, val = train_test_split(rest, test_size=0.2, random_state=SEED)
+        return Split(np.sort(train), np.sort(val), test)
     if chronological:
         n_test = n - test_start if test_start is not None else int(round(n * test_fraction))
         n_val = int(round((n - n_test) * 0.2))
@@ -59,15 +68,52 @@ def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.S
     return Split(np.sort(train), np.sort(val), np.sort(test))
 
 
+class SignConstrainedLinearRegression(LinearRegression):
+    """Least squares in which a declared effect fixes the sign of its coefficient.
+
+    "More heating temperature = more gas" is physics; when the data (with correlated
+    inputs) would give that coefficient the wrong sign, the coefficient becomes 0 instead
+    and the other coefficients are fitted around it. Prediction and ONNX export are those
+    of a normal linear regression. Inputs are standardised first, which keeps every sign.
+    """
+
+    def __init__(self, signs: list[int] | None = None) -> None:
+        super().__init__()
+        self.signs = signs
+
+    def fit(self, X, y, sample_weight=None):  # noqa: ARG002 - same signature as LinearRegression
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        signs = np.asarray(self.signs if self.signs is not None else [0] * X.shape[1])
+        lower = np.where(signs > 0, 0.0, -np.inf)
+        upper = np.where(signs < 0, 0.0, np.inf)
+        design = np.hstack([X, np.ones((len(X), 1))])
+        solution = lsq_linear(design, y, bounds=(np.append(lower, -np.inf), np.append(upper, np.inf)),
+                              lsmr_tol="auto", method="bvls" if X.shape[1] < 200 else "trf").x
+        self.coef_, self.intercept_ = solution[:-1], float(solution[-1])
+        self.n_features_in_ = X.shape[1]
+        return self
+
+
+def pinned_effects(model: Pipeline, names: list[str], monotone: list[int] | None) -> list[str]:
+    """Declared effects the data did not support: the constrained linear model set them to 0."""
+    est = model.named_steps.get("model")
+    if not monotone or not isinstance(est, SignConstrainedLinearRegression):
+        return []
+    return [name for name, d, c in zip(names, monotone, est.coef_) if d and abs(c) < 1e-9]
+
+
 def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | None = None) -> dict[str, Pipeline]:
-    """`monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint."""
+    """`monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint and,
+    for regression, a sign constraint on the linear model's coefficients."""
     impute = ("impute", SimpleImputer(strategy="median", keep_empty_features=True))
     lgbm = dict(n_estimators=400, learning_rate=0.05, num_leaves=31, random_state=SEED, verbose=-1)
     if monotone and any(monotone):
         lgbm["monotone_constraints"] = monotone
     if task == "regression":
+        linear = SignConstrainedLinearRegression(monotone) if monotone and any(monotone) else LinearRegression()
         return {
-            "linear_regression": Pipeline([impute, ("scale", StandardScaler()), ("model", LinearRegression())]),
+            "linear_regression": Pipeline([impute, ("scale", StandardScaler()), ("model", linear)]),
             "lightgbm": Pipeline([impute, ("model", LGBMRegressor(**lgbm))]),
         }
     if task == "classification":

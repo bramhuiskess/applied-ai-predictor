@@ -17,9 +17,11 @@ from skl2onnx.common.shape_calculator import (
     calculate_linear_classifier_output_shapes,
     calculate_linear_regressor_output_shapes,
 )
+from skl2onnx.operator_converters.linear_regressor import convert_sklearn_linear_regressor
 from sklearn.pipeline import Pipeline
 
 from predictor.adapters.onnx_runner import OnnxRunner
+from predictor.trainer.models import SignConstrainedLinearRegression
 
 TARGET_OPSET = {"": 17, "ai.onnx.ml": 3}
 PARITY_RTOL = 1e-4
@@ -32,6 +34,12 @@ update_registered_converter(
 update_registered_converter(
     LGBMRegressor, "LightGbmLGBMRegressor", calculate_linear_regressor_output_shapes, convert_lightgbm,
     options={"split": None},
+)
+
+# Only the fitting differs; the fitted model is an ordinary linear regression.
+update_registered_converter(
+    SignConstrainedLinearRegression, "SignConstrainedLinearRegression", calculate_linear_regressor_output_shapes,
+    convert_sklearn_linear_regressor,
 )
 
 
