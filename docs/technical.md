@@ -144,6 +144,8 @@ existed still work; retrain them to see the charts.
 | GET | `/models/{id}` | metadata: inputs, kinds, units, training ranges, metrics, policy, JSON Schema |
 | GET | `/models/{id}/evaluation` | model comparison, feature importance and a test-set sample for charts |
 | POST | `/models/{id}/scenario/check` | check a scenario request (base + up to 20 scenarios) and return what would be calculated, see [scenarios.md](scenarios.md) |
+| POST | `/models/{id}/scenario` | calculate the base and up to 20 scenarios |
+| POST | `/models/{id}/scenario/sweep` | slide one lever over a range and calculate every point |
 | POST | `/models/{id}/predict` | JSON, up to 10,000 records, all-or-nothing |
 | POST | `/models/{id}/predict/batch` | JSONL in, JSONL out, unlimited size, errors per line |
 | GET | `/` | dashboard (redirects to `/dashboard`) |
@@ -183,6 +185,7 @@ an unknown category, or NaN/Infinity.
     "time_column": "period",                    // sort + chronological split; not a feature
     "horizon_steps": null,                      // forecast the target N rows ahead
     "test_from": null,                          // backtest: rows from this date on are the test set ("2021-01-01")
+    "target_min": null, "target_max": null,     // physical limits of the output (gas >= 0); predictions stay within
     "baseline": null,                           // a column that is a simple guess for the target, e.g.
                                                 // {"column": "yield_5y_avg", "label": "same as the last 5 years"}
     "drop_columns": ["department_id"],

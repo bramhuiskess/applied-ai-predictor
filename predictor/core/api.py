@@ -14,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from predictor.core.scenario import MAX_SCENARIOS
+from predictor.core.scenario import MAX_SCENARIOS, MAX_SWEEP_POINTS
 
 from predictor.core.service import (
     SCHEMA_VERSION,
@@ -92,6 +92,28 @@ class ScenarioRequest(BaseModel):
                 for s in self.scenarios]
 
 
+EXAMPLE_SWEEP = {
+    "schema_version": "1.0",
+    "base": EXAMPLE_SCENARIO["base"],
+    "lever": "temp_setpoint_c",
+    "from": 17,
+    "to": 23,
+    "step": 0.5,
+}
+
+
+class SweepRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, populate_by_name=True,
+                              json_schema_extra={"examples": [EXAMPLE_SWEEP]})
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    base: Record
+    lever: str
+    # Default: the lever's whole range in its own step.
+    from_: float | None = Field(default=None, alias="from")
+    to: float | None = None
+    step: float | None = Field(default=None, gt=0)
+
+
 def create_app(service: PredictionService) -> FastAPI:
     app = FastAPI(
         title="Applied AI prediction backend",
@@ -159,6 +181,29 @@ def create_app(service: PredictionService) -> FastAPI:
     )
     def check_scenario(use_case_id: str, body: ScenarioRequest) -> dict[str, Any]:
         return service.check_scenarios(use_case_id, body.base.model_dump(), body.scenario_dicts())
+
+    @app.post(
+        "/models/{use_case_id}/scenario",
+        summary="Calculate scenarios",
+        description=(
+            "Same request as `/scenario/check`. Calculates the base and every scenario with the model in one "
+            "batch and returns the model output per row (`outputs`, keyed by output name)."
+        ),
+    )
+    def run_scenario(use_case_id: str, body: ScenarioRequest) -> dict[str, Any]:
+        return service.run_scenarios(use_case_id, body.base.model_dump(), body.scenario_dicts())
+
+    @app.post(
+        "/models/{use_case_id}/scenario/sweep",
+        summary="Sweep one lever over a range",
+        description=(
+            "Slides one lever from `from` to `to` in steps of `step` (default: the lever's whole range and step) "
+            f"and calculates every point, at most {MAX_SWEEP_POINTS}. Everything else stays as in `base`. "
+            "Points beyond the data the model has seen are flagged."
+        ),
+    )
+    def sweep_scenario(use_case_id: str, body: SweepRequest) -> dict[str, Any]:
+        return service.sweep(use_case_id, body.base.model_dump(), body.lever, body.from_, body.to, body.step)
 
     @app.post("/models/{use_case_id}/predict")
     def predict(use_case_id: str, body: PredictRequest) -> dict[str, Any]:

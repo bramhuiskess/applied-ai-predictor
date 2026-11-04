@@ -162,3 +162,34 @@ def resolve_scenarios(
 
 def _fmt(value: float) -> str:
     return f"{value:g}"
+
+
+# --------------------------------------------------------------------------- sweep (ticket 4)
+
+MAX_SWEEP_POINTS = 201
+
+
+def sweep_values(scenario: ScenarioConfig, lever_name: str, start: float | None, stop: float | None,
+                 step: float | None) -> tuple[list[float], list[dict[str, Any]]]:
+    """The values to try for one lever: from start to stop (default: the lever's whole range)."""
+    lever = scenario.levers.get(lever_name)
+    if lever is None:
+        return [], [{"scenario": None, "field": "lever", "message": f"{lever_name!r} cannot be changed in a "
+                     f"scenario; you can change: {', '.join(scenario.levers)}"}]
+    start = lever.min if start is None else start
+    stop = lever.max if stop is None else stop
+    step = lever.step if step is None else step
+    problems = []
+    if not lever.min - _EPSILON <= start < stop <= lever.max + _EPSILON:
+        problems.append(f"the sweep {_fmt(start)} - {_fmt(stop)} must go upwards and stay within the allowed "
+                        f"range {_fmt(lever.min)} - {_fmt(lever.max)}")
+    elif (stop - start) / step + 1 > MAX_SWEEP_POINTS + _EPSILON:
+        problems.append(f"{_fmt(start)} - {_fmt(stop)} in steps of {_fmt(step)} gives more than "
+                        f"{MAX_SWEEP_POINTS} points; use a bigger step")
+    if problems:
+        return [], [{"scenario": None, "field": "lever", "message": m} for m in problems]
+    count = int((stop - start) / step + _EPSILON) + 1
+    values = [round(start + i * step, 10) for i in range(count)]
+    if stop - values[-1] > _EPSILON:
+        values.append(stop)  # always include the end of the range
+    return [int(v) if float(v).is_integer() else v for v in values], []

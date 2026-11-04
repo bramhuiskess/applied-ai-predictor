@@ -41,6 +41,8 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     task = data.task
     feature_names = [f.name for f in data.features]
     monotone = _scenario_constraints(manifest, data)
+    bounds = ((cfg.target_min, cfg.target_max)
+              if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None) else None)
     test_start = None
     if cfg.test_from:
         test_start = int((data.times < pd.Timestamp(cfg.test_from)).sum())
@@ -67,10 +69,10 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone).items():
         pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
         make_thresholds_float32_safe(pipeline)
-        val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val)
+        val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds)
         final = clone(pipeline).fit(X_fit.to_numpy(dtype="float32"), y_fit)
         make_thresholds_float32_safe(final)
-        test_metrics = models.evaluate(task, final, X_test, y_test, label_test)
+        test_metrics = models.evaluate(task, final, X_test, y_test, label_test, bounds)
         results[name] = {"model": final, "validation": val_metrics, "test": test_metrics}
         violations = models.effect_violations(final, feature_names, monotone)
         if violations:
@@ -105,6 +107,9 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "runner": "onnx",
         "target_name": data.target_name,
         "target_unit": cfg.units.get(cfg.target) if cfg.target else None,
+        "target_bounds": ([cfg.target_min, cfg.target_max]
+                          if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None)
+                          else None),
         "classes": data.classes,
         "features": feature_names,
         "metrics": chosen["test"],

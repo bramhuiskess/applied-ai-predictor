@@ -43,7 +43,7 @@ Zonder Docker kan ook, zie [`docs/technical.md`](docs/technical.md).
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 126 tests, die draaien ook op GitHub Actions
+- 146 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 

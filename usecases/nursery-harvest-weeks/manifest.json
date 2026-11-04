@@ -10,6 +10,7 @@
     "target": "weeks_to_harvest",
     "task": "regression",
     "time_column": "start_date",
+    "target_min": 0,
     "drop_columns": [
       "batch_id",
       "compartment",

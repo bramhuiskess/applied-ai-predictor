@@ -87,10 +87,14 @@ def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | Non
 
 
 def evaluate(task: str, model: Pipeline, X: pd.DataFrame, y: pd.Series | None,
-             evaluation_label: pd.Series | None = None) -> dict[str, float]:
+             evaluation_label: pd.Series | None = None, bounds: tuple | None = None) -> dict[str, float]:
+    """Metrics on a split. `bounds` clips regression predictions like the API does."""
     X = X.to_numpy(dtype=np.float32)
     if task == "regression":
         pred = model.predict(X)
+        if bounds:
+            pred = np.clip(pred, bounds[0] if bounds[0] is not None else -np.inf,
+                           bounds[1] if bounds[1] is not None else np.inf)
         return {
             "mae": float(mean_absolute_error(y, pred)),
             "rmse": float(root_mean_squared_error(y, pred)),

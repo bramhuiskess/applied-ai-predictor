@@ -46,6 +46,9 @@ class TrainingConfig(_Strict):
     # Backtest: everything from this date on is the test set (e.g. train up to 2020, test 2021-2025).
     test_from: date | None = None
     baseline: Baseline | None = None
+    # Physical limits of the target (gas use cannot be negative). Predictions are kept within them.
+    target_min: float | None = None
+    target_max: float | None = None
     drop_columns: list[str] = []
     rename_columns: dict[str, str] = {}
     evaluation_label: str | None = None
@@ -63,6 +66,10 @@ class TrainingConfig(_Strict):
             raise ValueError("'horizon_steps' needs a 'time_column' to order the records")
         if self.baseline and (self.horizon_steps or self.task in ("classification", "anomaly")):
             raise ValueError("'baseline' is for regression without horizon_steps (that has its own baseline)")
+        if (self.target_min is not None or self.target_max is not None) and self.task not in ("auto", "regression"):
+            raise ValueError("'target_min'/'target_max' only apply to regression")
+        if self.target_min is not None and self.target_max is not None and self.target_min >= self.target_max:
+            raise ValueError("'target_min' must be smaller than 'target_max'")
         if self.test_from and not self.time_column:
             raise ValueError("'test_from' needs a 'time_column' to know which records come after it")
         return self

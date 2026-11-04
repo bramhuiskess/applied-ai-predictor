@@ -15,6 +15,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.ticker  # noqa: E402,F401
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
@@ -177,6 +178,56 @@ def constraints_chart(before: Path, after: Path) -> Path:
     return path
 
 
+def sweep_chart() -> Path:
+    """A temperature sweep through the real scenario engine, next to the simulator's true curve."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import knmi
+    import make_nursery as mn
+    from predictor import bootstrap
+
+    df, sim, batches = mn.generate(knmi.load_daily(mn.STATION, "2015-06-01", mn.END))
+    by_id = {b["batch_id"]: b for b in batches}
+    service = bootstrap.build_service()
+    october = df[df["batch_id"] == "K14-20241014"].iloc[0]
+    june = df[(df["start_week"].between(23, 25)) & (df["start_date"] >= "2024") & (df["lamp_type"] == "led")].iloc[0]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7), sharex=True)
+    panels = [("weeks_to_harvest", "nursery-harvest-weeks", "weeks to harvest", "{:.1f}"),
+              ("gas_m3", "nursery-gas", "gas (m³)", "{:,.0f}")]
+    for col, (row, label) in enumerate([(october, "October"), (june, "June")]):
+        for r, (output, use_case, ylabel, fmt) in enumerate(panels):
+            ax = axes[r, col]
+            order = service.describe(use_case)["feature_schema"]["x-feature-order"]
+            features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+            body = service.sweep(use_case, {"features": features}, "temp_setpoint_c")
+            xs = [p["value"] for p in body["points"]]
+            model = [p["outputs"][output]["value"] for p in body["points"]]
+            true = [sim.counterfactual(by_id[row["batch_id"]], temp_setpoint_c=v)[output] for v in xs]
+            low, _ = body["lever"]["training_range"]
+            ax.axvspan(xs[0], low, color=GRID, alpha=0.7, lw=0)
+            ax.plot(xs, true, color=BLUE, lw=2, marker="o", ms=4, label="True (simulator)")
+            ax.plot(xs, model, color=ORANGE, lw=2, marker="o", ms=4, label="Model (scenario sweep)")
+            ax.axvline(row["temp_setpoint_c"], color=MUTED, lw=1, ls="--")
+            ax.margins(y=0.15)
+            ax.text(row["temp_setpoint_c"], ax.get_ylim()[1], " grower's setting", va="top", fontsize=8.5, color=MUTED)
+            ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _, f=fmt: f.format(v)))
+            if r == 0:
+                ax.set_title(f"Batch started week {row['start_week']} ({label})", loc="left", fontsize=11, color=INK)
+            if col == 0:
+                ax.set_ylabel(ylabel)
+            if r == 1:
+                ax.set_xlabel("greenhouse temperature setpoint (°C)")
+    axes[0, 0].text(xs[0] + 0.05, axes[0, 0].get_ylim()[0], " not in the data", fontsize=8.5, color=MUTED, va="bottom")
+    axes[0, 0].legend(loc="upper right", frameon=False, fontsize=9.5)
+    title(fig, "Scenario sweep: the model vs. the true curve of the same batch",
+          "Unseen 2024 batches. October: the model follows the curve. June: the truth is flat, the model still invents an effect.")
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    path = OUT / "scenario_sweep.png"
+    fig.savefig(path, dpi=150)
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenarios-small", type=Path)
@@ -184,8 +235,11 @@ def main() -> None:
     parser.add_argument("--constraints", type=Path, nargs=2, metavar=("BEFORE", "AFTER"),
                         help="check_scenarios.py JSON without and with declared effects")
     parser.add_argument("--models", type=Path, default=Path("models"))
+    parser.add_argument("--sweep", action="store_true", help="temperature sweep vs. the answer key")
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
+    if args.sweep:
+        print("wrote", sweep_chart())
     if args.constraints:
         print("wrote", constraints_chart(*args.constraints))
     if args.scenarios_small and args.scenarios_large:
