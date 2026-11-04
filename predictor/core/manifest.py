@@ -67,6 +67,11 @@ class TrainingConfig(_Strict):
             raise ValueError("'test_from' needs a 'time_column' to know which records come after it")
         return self
 
+    @property
+    def outputs(self) -> list[str]:
+        """What the use case predicts. One target for now; the multi-output ticket extends this."""
+        return [self.target] if self.target else []
+
 
 class ModelRef(_Strict):
     runner: str = "onnx"
@@ -104,6 +109,42 @@ class Policy(_Strict):
         return self
 
 
+MAX_LEVER_STEPS = 10_000
+
+
+class Lever(_Strict):
+    """An input the user may change in a scenario (e.g. the greenhouse temperature)."""
+
+    label: str | None = None
+    unit: str | None = None
+    min: float
+    max: float
+    step: float = Field(gt=0)
+    # Expected direction per output, only where it always holds ("more lamp light -> less gas").
+    # It becomes a hard monotone constraint for the model, so do not declare what you cannot back up.
+    effects: dict[str, Literal["increasing", "decreasing"]] = {}
+
+    @model_validator(mode="after")
+    def _check_range(self) -> Lever:
+        if self.min >= self.max:
+            raise ValueError(f"min ({self.min}) must be smaller than max ({self.max})")
+        if (self.max - self.min) / self.step > MAX_LEVER_STEPS:
+            raise ValueError(f"step {self.step} is too small for the range {self.min}-{self.max}")
+        return self
+
+
+class ScenarioOutput(_Strict):
+    label: str | None = None
+    # Value of one unit of this output in euros, for comparing scenarios in money.
+    # Positive for what you sell (a plant), negative for what you pay (a m3 of gas).
+    value_eur: float | None = None
+
+
+class ScenarioConfig(_Strict):
+    levers: dict[str, Lever] = Field(min_length=1)
+    outputs: dict[str, ScenarioOutput] = {}
+
+
 class Manifest(_Strict):
     manifest_version: str
     use_case_id: str
@@ -112,6 +153,36 @@ class Manifest(_Strict):
     training: TrainingConfig
     model: ModelRef = ModelRef()
     policy: Policy = Policy()
+    scenario: ScenarioConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_scenario(self) -> Manifest:
+        if self.scenario is None:
+            return self
+        t = self.training
+        if not t.outputs or t.task == "anomaly":
+            raise ValueError("scenario: needs a target to predict (anomaly use cases have no output to compare)")
+        if t.horizon_steps:
+            raise ValueError("scenario: not supported together with horizon_steps yet")
+        not_features = {
+            "target": set(t.outputs), "time_column": {t.time_column}, "drop_columns": set(t.drop_columns),
+            "evaluation_label": {t.evaluation_label},
+        }
+        forbidden = {f.lower() for f in self.policy.forbidden_fields}
+        for name, lever in self.scenario.levers.items():
+            for what, names in not_features.items():
+                if name in names:
+                    raise ValueError(f"scenario.levers.{name}: is the {what}, so it is not a model input")
+            if name.lower() in forbidden:
+                raise ValueError(f"scenario.levers.{name}: is a forbidden field in the policy")
+            for output in lever.effects:
+                if output not in t.outputs:
+                    raise ValueError(f"scenario.levers.{name}.effects: unknown output {output!r} "
+                                     f"(outputs: {', '.join(t.outputs)})")
+        for output in self.scenario.outputs:
+            if output not in t.outputs:
+                raise ValueError(f"scenario.outputs: unknown output {output!r} (outputs: {', '.join(t.outputs)})")
+        return self
 
     @field_validator("manifest_version")
     @classmethod

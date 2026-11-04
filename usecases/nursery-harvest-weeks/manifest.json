@@ -39,5 +39,58 @@
     "contains_personal_data": false,
     "reject_unknown_fields": true,
     "log_feature_values": true
+  },
+  "scenario": {
+    "levers": {
+      "temp_setpoint_c": {
+        "label": "Greenhouse temperature",
+        "unit": "°C",
+        "min": 17,
+        "max": 23,
+        "step": 0.5
+      },
+      "light_hours": {
+        "label": "Lamp hours",
+        "unit": "h/day",
+        "min": 0,
+        "max": 18,
+        "step": 0.5,
+        "effects": {
+          "weeks_to_harvest": "decreasing"
+        }
+      },
+      "co2_ppm": {
+        "label": "CO₂ level",
+        "unit": "ppm",
+        "min": 400,
+        "max": 1100,
+        "step": 50,
+        "effects": {
+          "weeks_to_harvest": "decreasing"
+        }
+      },
+      "ec_ms_cm": {
+        "label": "Fertiliser (EC)",
+        "unit": "mS/cm",
+        "min": 1.2,
+        "max": 2.8,
+        "step": 0.1
+      },
+      "plant_density_m2": {
+        "label": "Plant density",
+        "unit": "plants/m²",
+        "min": 32,
+        "max": 64,
+        "step": 1,
+        "effects": {
+          "weeks_to_harvest": "decreasing"
+        }
+      }
+    },
+    "outputs": {
+      "weeks_to_harvest": {
+        "label": "Weeks to harvest"
+      }
+    }
   }
 }

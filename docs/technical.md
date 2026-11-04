@@ -199,6 +199,13 @@ an unknown category, or NaN/Infinity.
     "log_feature_values": false,                // must be false for personal data
     "forbidden_fields": ["diagnosis", "illness_cause", "treatment", "employee_id", "bsn"],
     "min_group_size": { "field": "headcount", "min": 5 }
+  },
+  "scenario": {                                 // optional: inputs a user may change, see docs/scenarios.md
+    "levers": {
+      "light_hours": { "label": "Lamp hours", "unit": "h/day", "min": 0, "max": 18, "step": 0.5,
+                       "effects": { "gas_m3": "decreasing" } }   // only where it always holds
+    },
+    "outputs": { "gas_m3": { "label": "Gas use", "value_eur": -0.45 } }
   }
 }
 ```

@@ -43,7 +43,7 @@ Zonder Docker kan ook, zie [`docs/technical.md`](docs/technical.md).
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 75 tests, die draaien ook op GitHub Actions
+- 100 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -58,6 +58,9 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
 python scripts/make_nursery.py --faults && python scripts/make_arable.py && predictor train
 python scripts/check_scenarios.py   # klopt het model met het antwoordmodel?
 ```
+
+In het manifest geef je aan aan welke knoppen (levers) de gebruiker mag draaien, binnen welk bereik,
+en waar het altijd geldt welke kant op ("meer lamplicht = minder gas"). Zie [`docs/scenarios.md`](docs/scenarios.md).
 
 ## Nog te doen
 

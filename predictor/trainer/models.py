@@ -59,9 +59,12 @@ def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.S
     return Split(np.sort(train), np.sort(val), np.sort(test))
 
 
-def candidates(task: str, anomaly_share: float = 0.05) -> dict[str, Pipeline]:
+def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | None = None) -> dict[str, Pipeline]:
+    """`monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint."""
     impute = ("impute", SimpleImputer(strategy="median", keep_empty_features=True))
     lgbm = dict(n_estimators=400, learning_rate=0.05, num_leaves=31, random_state=SEED, verbose=-1)
+    if monotone and any(monotone):
+        lgbm["monotone_constraints"] = monotone
     if task == "regression":
         return {
             "linear_regression": Pipeline([impute, ("scale", StandardScaler()), ("model", LinearRegression())]),
@@ -116,6 +119,17 @@ def evaluate(task: str, model: Pipeline, X: pd.DataFrame, y: pd.Series | None,
             }
         )
     return metrics
+
+
+def effect_violations(model: Pipeline, names: list[str], monotone: list[int] | None) -> list[str]:
+    """Declared directions a linear model contradicts (tree models get them as hard constraints)."""
+    est = model.named_steps["model"]
+    if not monotone or not isinstance(est, (LinearRegression, LogisticRegression)):
+        return []
+    coef = np.atleast_2d(est.coef_)[0]  # scaled inputs: the sign is the same as for the raw input
+    return [f"{name} should be {'increasing' if d > 0 else 'decreasing'} but the model says "
+            f"{'increasing' if c > 0 else 'decreasing'}"
+            for name, d, c in zip(names, monotone, coef) if d and c and np.sign(c) != d]
 
 
 def is_better(task: str, a: dict[str, float], b: dict[str, float] | None) -> bool:
