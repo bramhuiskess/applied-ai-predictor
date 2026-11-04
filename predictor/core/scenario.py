@@ -241,7 +241,8 @@ def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict
     return {"outputs": result, "net_eur": round(sum(money), 2) if money else None}
 
 
-def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, comparison: dict[str, Any]) -> str:
+def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, comparison: dict[str, Any],
+              certainty: dict[str, Any] | None = None) -> str:
     """One plain sentence per scenario, for people who do not read JSON."""
     parts = []
     for output, item in comparison["outputs"].items():
@@ -269,7 +270,10 @@ def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, c
     text = f"{name}: " + "; ".join(parts)
     if comparison["net_eur"] is not None and len(comparison["outputs"]) > 1:
         text += f". Net worth {'+' if comparison['net_eur'] >= 0 else '-'}€{abs(comparison['net_eur']):,.0f}"
-    return text + "."
+    text += "."
+    if certainty:
+        text += " " + certainty["message"]
+    return text
 
 
 def _priced(config) -> bool:

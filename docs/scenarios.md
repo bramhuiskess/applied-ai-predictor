@@ -10,7 +10,8 @@ used. This document grows with the scenario tickets.
 | 2. Scenario variables in manifest.json | done |
 | 3. Scenario input | done |
 | 4. Calculate a scenario | done |
-| 5. Difference base vs. scenario | **done** |
+| 5. Difference base vs. scenario | done |
+| Extra: how certain is a scenario? | **done** |
 
 ## Scenario variables in `manifest.json` (ticket 2)
 
@@ -226,6 +227,47 @@ the answer key.
   `difference` and `net_eur` are already keyed by output so they work unchanged then.
 - The margin is the error of one prediction. The error of a *difference* between two predictions of the same
   batch is usually smaller, so the rule errs on the side of caution.
+
+## How certain is a scenario? (comparable cases)
+
+A model always produces a number, also for a situation it has hardly seen ("17 °C, no lamps, no CO₂"
+in October). Every base, scenario and sweep point now says how many **comparable cases** the training
+data has, and the summary says what that means:
+
+```text
+1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292). Based on only 7 comparable batches in the history;
+treat the size of the effect with some care.
+very cold and dark: gas use 99.1% higher (+25,112 m³, worth -€11,049). Uncertain: no comparable batches in the
+history, so this is mostly extrapolation.
+```
+
+```jsonc
+"certainty": { "comparable_cases": 7, "level": "medium", "message": "Based on only 7 comparable batches ..." }
+```
+
+How it works: training stores a compact map of the training rows (every input standardised and
+weighted by how much the model uses it). Two cases are comparable when they are within a radius
+chosen so that a typical training case has about ten comparable cases. Levels: **low** 0-2,
+**medium** 3-9, **high** 10+. `scenario.case_label` names the cases ("batches").
+
+**Does it work? (the answer key)** `python scripts/check_scenarios.py --certainty` sweeps every lever
+for 60 unseen batches through the real engine (6,500 points per output) and compares the predicted
+effect with the true one:
+
+| Certainty | Gas | Plants sold | Weeks to harvest |
+|---|---|---|---|
+| low (0-2 comparable) | 26.0% | 5.1% | 6.2% |
+| medium (3-9) | 18.0% | 1.7% | 3.2% |
+| **high (10+)** | **7.2%** | **1.2%** | **1.9%** |
+
+*Average error of the predicted effect, as % of the output's normal level.* With high certainty the
+effect is 3-4× more accurate than with low certainty, for all three outputs; the thresholds 3 and 10
+are where the error drops most.
+
+**Privacy and data minimisation**: the map holds transformed training rows, so it is only stored for
+use cases with a `scenario` section and never for use cases with personal data (unless
+`policy.publish_evaluation_rows` allows it). Without a map, `certainty` is `null`. Training sets larger
+than 5,000 rows are subsampled and the counts scaled up.
 
 ### Not in this ticket
 

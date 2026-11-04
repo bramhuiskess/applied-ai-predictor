@@ -211,7 +211,8 @@ an unknown category, or NaN/Infinity.
       "light_hours": { "label": "Lamp hours", "unit": "h/day", "min": 0, "max": 18, "step": 0.5,
                        "effects": { "gas_m3": "decreasing" } }   // only where it always holds
     },
-    "outputs": { "gas_m3": { "label": "Gas use", "price_from": "gas_price_eur_m3", "is_cost": true } }
+    "outputs": { "gas_m3": { "label": "Gas use", "price_from": "gas_price_eur_m3", "is_cost": true } },
+    "case_label": "batches"                     // "based on 14 comparable batches in the history"
                                                 // or a fixed "value_eur" per unit (negative for a cost)
   }
 }

@@ -92,6 +92,7 @@
       "weeks_to_harvest": {
         "label": "Weeks to harvest"
       }
-    }
+    },
+    "case_label": "batches"
   }
 }

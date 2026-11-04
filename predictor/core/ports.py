@@ -37,6 +37,7 @@ class LoadedModel:
     descriptor: dict[str, Any]
     feature_schema: dict[str, Any]
     runner: ModelRunner
+    support: dict[str, Any] | None = None  # map of the training data, for "comparable cases"
 
     @property
     def version(self) -> str:

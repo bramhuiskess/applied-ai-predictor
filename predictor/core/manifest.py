@@ -161,6 +161,9 @@ class ScenarioOutput(_Strict):
 class ScenarioConfig(_Strict):
     levers: dict[str, Lever] = Field(min_length=1)
     outputs: dict[str, ScenarioOutput] = {}
+    # What one row is, in the user's words ("batches", "fields"), for messages like
+    # "based on 14 comparable batches in the history".
+    case_label: str = Field(default="cases", min_length=1, max_length=40)
 
 
 class Manifest(_Strict):

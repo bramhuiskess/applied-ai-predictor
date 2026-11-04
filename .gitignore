@@ -8,3 +8,6 @@ data/*.csv
 data/*.json
 data/raw/
 !data/.gitkeep
+
+# personal notes (e.g. working-paper logs)
+*.local.md
