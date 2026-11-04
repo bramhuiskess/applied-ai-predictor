@@ -201,3 +201,11 @@ def test_clear_effects_point_the_right_way(nursery):
             right.append(np.sign(d["change"]) == np.sign(round(true, 6)))
     assert len(right) >= 20
     assert np.mean(right) >= 0.85, np.mean(right)
+
+
+@pytest.mark.parametrize("eur, text", [(2292.4, "+€2,292"), (-20.0, "-€20"), (-0.00266, "-€0.0027"),
+                                       (0.04, "+€0.04"), (0.0, "€0")])
+def test_small_amounts_keep_their_sign_and_size(eur, text):
+    """Per m² a degree warmer costs fractions of a cent: that must not read as '+€0'."""
+    from predictor.core.scenario import _eur_text, _round_eur
+    assert _eur_text(_round_eur(eur)) == text

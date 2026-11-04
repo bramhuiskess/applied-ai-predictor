@@ -48,7 +48,7 @@ python scripts/make_nursery.py && python scripts/make_arable.py   # scenario dat
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 186 tests, ~40 s, fully offline
+pytest                            # 191 tests, ~40 s, fully offline
 ```
 
 ### Technical notebook

@@ -231,14 +231,14 @@ def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict
             "change_pct": round(change / abs(before["value"]) * 100, 2) if before["value"] else None,
         }
         eur = _money(config, row, now["value"]) - _money(config, base_row, before["value"]) if _priced(config) else None
-        item["eur"] = round(eur, 2) if eur is not None else None
+        item["eur"] = _round_eur(eur) if eur is not None else None
         if eur is not None:
             money.append(eur)
         margin = margin_of_error(descriptor)
         item["margin"] = margin
         item["exceeds_margin"] = None if margin is None else abs(change) >= margin
         result[name] = item
-    return {"outputs": result, "net_eur": round(sum(money), 2) if money else None}
+    return {"outputs": result, "net_eur": _round_eur(sum(money)) if money else None}
 
 
 def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, comparison: dict[str, Any],
@@ -261,7 +261,7 @@ def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, c
             else f"{label} {direction}"
         detail = f"{item['change']:+,.{_decimals(item['change'])}f} {unit}".strip()
         if item["eur"] is not None:  # positive = better for the grower (more income or lower cost)
-            detail += f", worth {'+' if item['eur'] >= 0 else '-'}€{abs(item['eur']):,.0f}"
+            detail += f", worth {_eur_text(item['eur'])}"
         sentence = f"{size} ({detail})"
         if item["exceeds_margin"] is False:
             sentence += (f"; this is within the model's typical error of ±{item['margin']:,.{_decimals(item['margin'])}f} "
@@ -269,11 +269,26 @@ def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, c
         parts.append(sentence)
     text = f"{name}: " + "; ".join(parts)
     if comparison["net_eur"] is not None and len(comparison["outputs"]) > 1:
-        text += f". Net worth {'+' if comparison['net_eur'] >= 0 else '-'}€{abs(comparison['net_eur']):,.0f}"
+        text += f". Net worth {_eur_text(comparison['net_eur'])}"
     text += "."
     if certainty:
         text += " " + certainty["message"]
     return text
+
+
+def _round_eur(eur: float) -> float:
+    """Cents for normal amounts; small amounts (per m², per day) keep 3 significant digits."""
+    if eur == 0 or abs(eur) >= 1:
+        return round(eur, 2)
+    return float(f"{eur:.3g}")
+
+
+def _eur_text(eur: float) -> str:
+    """+€2,292 / -€20 / +€0.0027: the sign comes from the unrounded amount, so a small cost is never '+€0'."""
+    sign = "+" if eur > 0 else "-" if eur < 0 else ""
+    amount = abs(eur)
+    text = f"{amount:,.0f}" if amount >= 1 or amount == 0 else f"{amount:.2g}"
+    return f"{sign}€{text}"
 
 
 def _priced(config) -> bool:
