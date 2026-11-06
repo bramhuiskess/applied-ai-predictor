@@ -4,8 +4,67 @@
   "description": "Gas used to heat a batch (synthetic nursery with a known cause-and-effect model, real KNMI weather 2016-2025).",
   "data_source": {
     "adapter": "csv-file",
-    "path": "data/nursery.csv"
+    "path": "data/nursery_base.csv"
   },
+  "joins": [
+    {
+      "name": "compartment",
+      "source": {
+        "adapter": "csv-file",
+        "path": "data/compartments.csv"
+      },
+      "keys": {
+        "compartment": "compartment"
+      },
+      "aggregate": {
+        "area_m2": {
+          "column": "area_m2",
+          "op": "first"
+        },
+        "lamp_type": {
+          "column": "lamp_type",
+          "op": "first"
+        },
+        "u_value": {
+          "column": "u_value",
+          "op": "first"
+        }
+      }
+    },
+    {
+      "name": "weather",
+      "source": {
+        "adapter": "csv-file",
+        "path": "data/weather_rotterdam.csv"
+      },
+      "time": {
+        "base": "start_date",
+        "lookup": "date"
+      },
+      "window": {
+        "start": {
+          "offset": 0
+        },
+        "end": {
+          "offset": 10,
+          "unit": "weeks"
+        }
+      },
+      "aggregate": {
+        "outside_temp_avg_c": {
+          "column": "temp_mean_c",
+          "op": "mean",
+          "round": 2
+        },
+        "radiation_avg_j_cm2": {
+          "column": "radiation_j_cm2",
+          "op": "mean",
+          "round": 1
+        }
+      },
+      "fallback": "climatology"
+    }
+  ],
   "training": {
     "target": "gas_m3",
     "task": "regression",
@@ -94,6 +153,7 @@
         "price_from": "gas_price_eur_m3",
         "is_cost": true
       }
-    }
+    },
+    "case_label": "batches"
   }
 }

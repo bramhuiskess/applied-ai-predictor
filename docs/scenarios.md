@@ -10,7 +10,8 @@ used. This document grows with the scenario tickets.
 | 2. Scenario variables in manifest.json | done |
 | 3. Scenario input | done |
 | 4. Calculate a scenario | done |
-| 5. Difference base vs. scenario | **done** |
+| 5. Difference base vs. scenario | done |
+| Extra: how certain is a scenario? | **done** |
 
 ## Scenario variables in `manifest.json` (ticket 2)
 
@@ -45,18 +46,23 @@ Everything that is not a lever is **context** (weather, season, compartment): a 
 ### Declared effects are hard rules for the model
 
 `effects` become **monotone constraints** in LightGBM: whatever the situation, turning that lever
-up can only move the output the declared way. A linear model cannot be constrained, so it is
-checked instead: if it contradicts a declared effect it is not eligible to win. The training report
-lists the levers, the constraints, and any model that was excluded.
+up can only move the output the declared way. The linear model gets them as **sign constraints**:
+it is fitted by least squares with that coefficient forced to the declared side (≥ 0 or ≤ 0). If the
+data would give the wrong sign, the coefficient becomes 0 and the other coefficients are fitted
+around it; the report then says which effects the data did not support ("held at 0"). The fitted
+model is an ordinary linear regression, so the ONNX export is unchanged. (A classifier's logistic
+model is still only checked: if it contradicts a declared effect it is not eligible to win.)
 
 **Only declare what always holds.** In the simulated nursery, "more heating = more gas" is *not*
 true per batch: a warmer batch is ready sooner, and 14% of batches use less gas in total. So
 temperature is a lever without a declared effect, while lamp light, CO₂ and plant density do have
 one (`tests/test_scenario_variables.py` checks every declared effect against the simulator's answer key).
 
-This already matters in the nursery gas model: the linear baseline learned "more CO₂ = more gas",
-because growers dose CO₂ in winter, exactly when they heat. That is a correlation, not an effect, so
-the linear model was excluded and the constrained LightGBM won.
+This already matters in the nursery gas model: the free linear baseline learned "more CO₂ = more gas",
+because growers dose CO₂ in winter, exactly when they heat. That is a correlation, not an effect.
+On real greenhouse data the sign constraint also made the model *more accurate*: excluding the linear
+model there left a LightGBM with R² 0.18 on an unseen greenhouse; the sign-constrained linear model
+reaches 0.57. A blend of the two (their average) obeys declared effects too: the average of two functions that only go up also only goes up (see [datasets.md](datasets.md#4-real-greenhouse-data-autonomous-greenhouse-challenge-wur)).
 
 The result on test batches the models never saw:
 
@@ -226,6 +232,47 @@ the answer key.
   `difference` and `net_eur` are already keyed by output so they work unchanged then.
 - The margin is the error of one prediction. The error of a *difference* between two predictions of the same
   batch is usually smaller, so the rule errs on the side of caution.
+
+## How certain is a scenario? (comparable cases)
+
+A model always produces a number, also for a situation it has hardly seen ("17 °C, no lamps, no CO₂"
+in October). Every base, scenario and sweep point now says how many **comparable cases** the training
+data has, and the summary says what that means:
+
+```text
+1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292). Based on only 7 comparable batches in the history;
+treat the size of the effect with some care.
+very cold and dark: gas use 99.1% higher (+25,112 m³, worth -€11,049). Uncertain: no comparable batches in the
+history, so this is mostly extrapolation.
+```
+
+```jsonc
+"certainty": { "comparable_cases": 7, "level": "medium", "message": "Based on only 7 comparable batches ..." }
+```
+
+How it works: training stores a compact map of the training rows (every input standardised and
+weighted by how much the model uses it). Two cases are comparable when they are within a radius
+chosen so that a typical training case has about ten comparable cases. Levels: **low** 0-2,
+**medium** 3-9, **high** 10+. `scenario.case_label` names the cases ("batches").
+
+**Does it work? (the answer key)** `python scripts/check_scenarios.py --certainty` sweeps every lever
+for 60 unseen batches through the real engine (6,500 points per output) and compares the predicted
+effect with the true one:
+
+| Certainty | Gas | Plants sold | Weeks to harvest |
+|---|---|---|---|
+| low (0-2 comparable) | 26.0% | 5.1% | 6.2% |
+| medium (3-9) | 18.0% | 1.7% | 3.2% |
+| **high (10+)** | **7.2%** | **1.2%** | **1.9%** |
+
+*Average error of the predicted effect, as % of the output's normal level.* With high certainty the
+effect is 3-4× more accurate than with low certainty, for all three outputs; the thresholds 3 and 10
+are where the error drops most.
+
+**Privacy and data minimisation**: the map holds transformed training rows, so it is only stored for
+use cases with a `scenario` section and never for use cases with personal data (unless
+`policy.publish_evaluation_rows` allows it). Without a map, `certainty` is `null`. Training sets larger
+than 5,000 rows are subsampled and the counts scaled up.
 
 ### Not in this ticket
 

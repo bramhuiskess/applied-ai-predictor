@@ -1,0 +1,118 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "greenhouse-heating",
+  "description": "Heating energy per m² per day of real greenhouses (Autonomous Greenhouse Challenge, WUR): cucumber 2018 and tomato 2019-2020, 12 compartments. Tested on the two compartments run by Dutch commercial growers.",
+  "data_source": {
+    "adapter": "csv-file",
+    "path": "data/greenhouse_days.csv"
+  },
+  "training": {
+    "target": "heat_mj_m2",
+    "task": "regression",
+    "time_column": "date",
+    "target_min": 0,
+    "drop_columns": [
+      "electricity_kwh_m2",
+      "lamp_power_w_m2"
+    ],
+    "units": {
+      "heat_setpoint_c": "°C",
+      "vent_setpoint_c": "°C",
+      "lamp_hours": "h/day",
+      "energy_screen_pct": "%",
+      "co2_setpoint_ppm": "ppm",
+      "outside_temp_c": "°C",
+      "outside_temp_min_c": "°C",
+      "radiation_j_cm2": "J/cm²/day",
+      "wind_ms": "m/s",
+      "outside_rh_pct": "%",
+      "heat_mj_m2": "MJ/m²",
+      "rail_min_c": "°C",
+      "grow_min_c": "°C"
+    },
+    "test_group": {
+      "column": "greenhouse",
+      "values": [
+        "Reference 2018",
+        "Reference 2020"
+      ]
+    }
+  },
+  "model": {
+    "runner": "onnx",
+    "version": "latest"
+  },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  },
+  "scenario": {
+    "levers": {
+      "heat_setpoint_c": {
+        "label": "Heating temperature",
+        "unit": "°C",
+        "min": 14,
+        "max": 26,
+        "step": 0.5,
+        "effects": {
+          "heat_mj_m2": "increasing"
+        }
+      },
+      "lamp_hours": {
+        "label": "Lamp hours",
+        "unit": "h/day",
+        "min": 0,
+        "max": 20,
+        "step": 1,
+        "effects": {
+          "heat_mj_m2": "decreasing"
+        }
+      },
+      "energy_screen_pct": {
+        "label": "Energy screen (climate computer %)",
+        "unit": "%",
+        "min": 0,
+        "max": 100,
+        "step": 10
+      },
+      "vent_setpoint_c": {
+        "label": "Ventilation temperature",
+        "unit": "°C",
+        "min": 17,
+        "max": 30,
+        "step": 0.5,
+        "effects": {
+          "heat_mj_m2": "decreasing"
+        }
+      },
+      "rail_min_c": {
+        "label": "Minimum rail pipe temperature",
+        "unit": "°C",
+        "min": 0,
+        "max": 40,
+        "step": 5,
+        "effects": {
+          "heat_mj_m2": "increasing"
+        }
+      },
+      "grow_min_c": {
+        "label": "Minimum crop pipe temperature",
+        "unit": "°C",
+        "min": 0,
+        "max": 60,
+        "step": 5,
+        "effects": {
+          "heat_mj_m2": "increasing"
+        }
+      }
+    },
+    "outputs": {
+      "heat_mj_m2": {
+        "label": "Heating energy",
+        "value_eur": -0.0083
+      }
+    },
+    "case_label": "greenhouse-days"
+  }
+}

@@ -10,7 +10,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
-from predictor.core.manifest import Manifest
+from predictor.core.certainty import SupportIndex, certainty
+from predictor.core.join_info import describe_joins
+from predictor.core.manifest import Manifest, ManifestError
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
 from predictor.core.scenario import (
@@ -49,6 +51,7 @@ class UseCase:
     manifest: Manifest
     model: LoadedModel | None
     validator: FeatureValidator | None
+    support: SupportIndex | None = None
 
     @property
     def status(self) -> str:
@@ -68,6 +71,7 @@ class _Checked:
     features: Any
     errors: list[FieldError]
     warnings: list[str]
+    filled: dict[str, Any] | None = None  # columns the joins filled in (shown to the caller, absent without joins)
 
 
 class PredictionService:
@@ -86,10 +90,12 @@ class PredictionService:
             if model is not None:
                 check_schema(manifest.use_case_id, manifest.policy, model.feature_schema)
                 check_scenario(manifest.use_case_id, manifest.scenario, model.feature_schema)
+                _check_joined_levers(manifest, model)
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
-            use_cases.append(UseCase(manifest, model, validator))
+            support = SupportIndex(model.support) if model and model.support and manifest.scenario else None
+            use_cases.append(UseCase(manifest, model, validator, support))
         return cls(use_cases, monitor)
 
     # ------------------------------------------------------------------ queries
@@ -129,9 +135,11 @@ class PredictionService:
                     "allowed_values": schema["properties"][name].get("enum"),
                     "unit": schema["properties"][name].get("x-unit"),
                     "training_range": schema["properties"][name].get("x-observed-range"),
+                    **_derived_info(uc, name),
                 }
                 for name in schema["x-feature-order"]
             ],
+            "joins": _describe_joins(uc),
             "policy": uc.manifest.policy.model_dump(),
             "scenario": describe_scenario(uc.manifest.scenario, schema, descriptor),
             "feature_schema": schema,
@@ -176,25 +184,34 @@ class PredictionService:
         resolved = self._resolve(uc, base.get("features"), scenarios)
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0,
                       warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
         return {
             **self._header(uc),
             "base": {"record_id": base.get("record_id"), "features": resolved.base,
-                     "warnings": resolved.base_warnings, "outputs": outputs[0]},
+                     "warnings": resolved.base_warnings, "outputs": outputs[0], "certainty": sure[0]},
             "scenarios": [self._scenario_result(uc, s.name, s.changes, s.features, s.warnings,
-                                                resolved.base, outputs[0], out)
-                          for s, out in zip(resolved.scenarios, outputs[1:])],
+                                                resolved.base, outputs[0], out, c)
+                          for s, out, c in zip(resolved.scenarios, outputs[1:], sure[1:])],
         }
 
     @staticmethod
     def _scenario_result(uc: UseCase, name: str, changes: list, features: dict, warnings: list,
-                         base_row: dict, base_out: dict, out: dict) -> dict[str, Any]:
+                         base_row: dict, base_out: dict, out: dict, sure: dict | None) -> dict[str, Any]:
         cfg, descriptor = uc.manifest.scenario, uc.model.descriptor
         comparison = compare(cfg, descriptor, base_row, base_out, features, out)
         return {"name": name, "changes": changes, "features": features, "warnings": warnings, "outputs": out,
-                "difference": comparison["outputs"], "net_eur": comparison["net_eur"],
-                "summary": summarise(cfg, descriptor, name, comparison)}
+                "difference": comparison["outputs"], "net_eur": comparison["net_eur"], "certainty": sure,
+                "summary": summarise(cfg, descriptor, name, comparison, sure)}
+
+    @staticmethod
+    def _certainty(uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
+        """How many comparable training cases each row has (None when not available)."""
+        if uc.support is None:
+            return [None] * len(rows)
+        counts = uc.support.comparable(uc.validator.to_matrix(rows))
+        return [certainty(c, uc.manifest.scenario.case_label) for c in counts]
 
     def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
               stop: float | None = None, step: float | None = None) -> dict[str, Any]:
@@ -208,6 +225,7 @@ class PredictionService:
         resolved = self._resolve(uc, base.get("features"), requested)
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
                                                        uc.model.descriptor)["levers"] if l["name"] == lever)
@@ -216,12 +234,13 @@ class PredictionService:
             **self._header(uc),
             "lever": lever_info,
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
-                     "value": resolved.base[lever], "outputs": outputs[0]},
+                     "value": resolved.base[lever], "outputs": outputs[0], "certainty": sure[0]},
             "points": [{"value": v, "outputs": out,
                         "difference": compare(uc.manifest.scenario, uc.model.descriptor, resolved.base, outputs[0],
                                               s.features, out)["outputs"],
-                        "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1]}
-                       for v, s, out in zip(values, resolved.scenarios, outputs[1:])],
+                        "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1],
+                        "certainty": c}
+                       for v, s, out, c in zip(values, resolved.scenarios, outputs[1:], sure[1:])],
         }
 
     def _scenario_use_case(self, use_case_id: str) -> UseCase:
@@ -239,9 +258,18 @@ class PredictionService:
             errors = check_record(uc.manifest.policy, row)
             return (errors, []) if errors else uc.validator.validate(row)
 
+        # The base is enriched once (joined columns from the lookup tables); every scenario starts from that
+        # row, so a lever change is never overwritten by a join. The policy sees the raw request first.
+        raw_errors = check_record(uc.manifest.policy, features)
+        features, join_errors, join_warnings = _enrich(uc, features)
+        problems = raw_errors or join_errors
+        if problems:
+            raise RequestRejected([{"scenario": None, "field": e.field, "message": e.message} for e in problems],
+                                  detail="invalid scenario request")
         resolved, errors = resolve_scenarios(uc.manifest.scenario, uc.model.feature_schema, features, scenarios, validate)
         if errors:
             raise RequestRejected(errors, detail="invalid scenario request")
+        resolved.base_warnings[:0] = join_warnings
         return resolved
 
     def _outputs(self, uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -348,8 +376,16 @@ class PredictionService:
         if errors:
             # Policy violations are reported before anything else touches the data.
             return _Checked(record_id, features, errors, [])
+        sent = features
+        features, join_errors, join_warnings = _enrich(uc, features)
+        if join_errors:
+            return _Checked(record_id, features, join_errors, [])
+        filled = _filled_in(uc, sent, features)
+        errors = check_record(uc.manifest.policy, features)  # e.g. a group size that was joined in
+        if errors:
+            return _Checked(record_id, features, errors, [])
         errors, warnings = uc.validator.validate(features)
-        return _Checked(record_id, features, errors, warnings)
+        return _Checked(record_id, features, errors, [*join_warnings, *warnings], filled)
 
     def _run(self, uc: UseCase, checked: list[_Checked]) -> list[dict[str, Any]]:
         matrix = uc.validator.to_matrix([c.features for c in checked])
@@ -370,6 +406,8 @@ class PredictionService:
                 item["prediction"] = output.values[i]
                 item["anomaly_score"] = round(float(output.scores[i]), 6)
             item["warnings"] = c.warnings
+            if c.filled:
+                item["filled_in"] = c.filled
             results.append(item)
         return results
 
@@ -400,3 +438,44 @@ class PredictionService:
             model_version=uc.model.version if uc.model else None,
             features=features,
         )
+
+
+# ------------------------------------------------------------------------------ joined inputs
+
+def _enrich(uc: UseCase, features: Any) -> tuple[Any, list[FieldError], list[str]]:
+    """Fill the columns the model was trained with from lookup tables (no-op without joins or for non-objects)."""
+    joins = uc.model.joins if uc.model else None
+    if joins is None or not isinstance(features, dict):
+        return features, [], []
+    return joins.enrich_record(features, set(uc.validator.feature_order))
+
+
+def _check_joined_levers(manifest: Manifest, model: LoadedModel) -> None:
+    if model.joins is None or manifest.scenario is None:
+        return
+    for lever in manifest.scenario.levers:
+        if lever in model.joins.derived:
+            raise ManifestError(f"{manifest.use_case_id}: scenario lever {lever!r} is calculated by join "
+                                f"{model.joins.derived[lever]!r}, so it cannot be changed; change its inputs instead")
+
+
+def _derived_info(uc: UseCase, name: str) -> dict[str, Any]:
+    joins = uc.model.joins
+    if joins is None or name not in joins.derived:
+        return {}
+    return {"derived_by": joins.derived[name], "required": False}
+
+
+def _filled_in(uc: UseCase, sent: Any, enriched: Any) -> dict[str, Any] | None:
+    """The columns the joins added to a request (None when nothing was filled in)."""
+    joins = uc.model.joins if uc.model else None
+    if joins is None or not isinstance(sent, dict):
+        return None
+    filled = {c: enriched[c] for c in joins.derived if c in enriched and sent.get(c) is None}
+    return filled or None
+
+
+def _describe_joins(uc: UseCase) -> list[dict[str, Any]]:
+    """For clients: how the model's inputs are connected to lookup tables and what can be sent instead."""
+    return describe_joins(uc.model.joins, uc.model.descriptor, set(uc.model.feature_schema["properties"]),
+                          uc.manifest.training.units)

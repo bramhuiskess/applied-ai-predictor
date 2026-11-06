@@ -293,6 +293,25 @@ def true_effects(nursery: Nursery, batches: list[dict], deltas: dict[str, float]
             for o in OUTPUTS}
 
 
+# Columns that come from other tables once the data is split (see split_tables): the compartment's
+# attributes and the weather of the first WEATHER_WINDOW_WEEKS weeks. nursery.csv keeps all of them.
+JOINED_COLUMNS = ["area_m2", "lamp_type", "u_value", "outside_temp_avg_c", "radiation_avg_j_cm2"]
+
+
+def split_tables(df: pd.DataFrame, daily: pd.DataFrame, nursery: Nursery) -> dict[str, pd.DataFrame]:
+    """The same data as separate tables, to be connected again by the joins in the manifest.
+
+    * base: one row per batch, without what is looked up from another table;
+    * compartments: one row per compartment (key join on ``compartment``);
+    * weather: daily KNMI values (time join on ``start_date``, window of WEATHER_WINDOW_WEEKS weeks).
+    """
+    compartments = pd.DataFrame([{"compartment": c.name, "area_m2": c.area_m2, "lamp_type": c.lamp_type,
+                                  "u_value": c.u_value} for c in nursery.compartments.values()])
+    weather = daily[["date", "temp_mean_c", "temp_min_c", "temp_max_c", "rain_mm", "radiation_j_cm2"]].copy()
+    weather["date"] = weather["date"].dt.strftime("%Y-%m-%d")
+    return {"base": df.drop(columns=JOINED_COLUMNS), "compartments": compartments, "weather": weather}
+
+
 def inject_faults(df: pd.DataFrame, seed: int = 11) -> tuple[pd.DataFrame, list[dict]]:
     """A copy with realistic data problems, plus a log of exactly what was broken."""
     rng = np.random.default_rng(seed)
@@ -339,6 +358,12 @@ def main() -> None:
     df, nursery, batches = generate(daily, args.compartments, args.seed)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, index=False)
+    tables = split_tables(df, daily, nursery)
+    split_paths = {"base": args.out.with_name(args.out.stem + "_base.csv"),
+                   "compartments": args.out.with_name("compartments.csv"),
+                   "weather": args.out.with_name("weather_rotterdam.csv")}  # the name the manifests use, also for --weather synthetic
+    for name, path in split_paths.items():
+        tables[name].to_csv(path, index=False)
 
     truth = {"description": "Average true effect per scenario over all batches (answer key, same luck per batch)",
              "weather": args.weather, "batches": len(df),
@@ -348,6 +373,8 @@ def main() -> None:
     print(f"wrote {args.out}: {len(df)} batches, {df['compartment'].nunique()} compartments, "
           f"{df['start_date'].min()} .. {df['start_date'].max()}")
     print(f"wrote {truth_path}")
+    print("also wrote the same data as separate tables for the joins in the manifests: "
+          + ", ".join(p.name for p in split_paths.values()))
     if args.faults:
         bad, log = inject_faults(df)
         bad_path = args.out.with_name(args.out.stem + "_faulty.csv")

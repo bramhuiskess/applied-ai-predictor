@@ -7,6 +7,8 @@ Layout::
         feature_schema.json  JSON Schema of the inputs
         model.onnx           the artefact (preprocessing + model in one graph)
         report.md            human-readable training report
+        joins.json           (optional) the joins the model was trained with
+        lookups/<name>.npz   (optional) snapshot of each lookup table, so the service needs no data files
 """
 
 from __future__ import annotations
@@ -18,10 +20,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from predictor.core.joins import JoinEngine
 from predictor.core.ports import LoadedModel, ModelRunner
 
 DESCRIPTOR = "descriptor.json"
 SCHEMA = "feature_schema.json"
+SUPPORT = "support.json"
+JOINS = "joins.json"
 
 RunnerFactory = Callable[[Path, dict[str, Any]], ModelRunner]
 
@@ -53,7 +58,16 @@ class FilesystemRegistry:
         if factory is None:
             raise LookupError(f"{use_case_id} v{version}: no runner installed for {descriptor['runner']!r}")
         runner = factory(directory / descriptor["artifact"], descriptor)
-        return LoadedModel(descriptor=descriptor, feature_schema=schema, runner=runner)
+        support_path = directory / SUPPORT
+        support = json.loads(support_path.read_text(encoding="utf-8")) if support_path.is_file() else None
+        joins = None
+        if (directory / JOINS).is_file():
+            # The model is self-contained: joins come from this version's snapshot, never from the current manifest.
+            try:
+                joins = JoinEngine.from_snapshot(lambda name: (directory / name).read_bytes())
+            except (OSError, ValueError, KeyError) as exc:
+                raise LookupError(f"{use_case_id} v{version}: cannot load the join snapshot ({exc})") from exc
+        return LoadedModel(descriptor=descriptor, feature_schema=schema, runner=runner, support=support, joins=joins)
 
     def publish(
         self,
@@ -63,7 +77,7 @@ class FilesystemRegistry:
         feature_schema: dict[str, Any],
         artifact_name: str,
         artifact: bytes,
-        extra_files: dict[str, str] | None = None,
+        extra_files: dict[str, str | bytes] | None = None,
     ) -> str:
         """Store a new version atomically and return its version number."""
         versions = self.versions(use_case_id)
@@ -77,7 +91,15 @@ class FilesystemRegistry:
             (staging / artifact_name).write_bytes(artifact)
             (staging / SCHEMA).write_text(json.dumps(feature_schema, indent=2), encoding="utf-8")
             for name, content in (extra_files or {}).items():
-                (staging / name).write_text(content, encoding="utf-8")
+                target = (staging / name).resolve()
+                if staging.resolve() not in target.parents:
+                    raise ValueError(f"extra file {name!r} must stay inside the model directory")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.parent.chmod(0o755)
+                if isinstance(content, bytes):
+                    target.write_bytes(content)
+                else:
+                    target.write_text(content, encoding="utf-8")
             # The descriptor is written last: a version only counts once it exists.
             (staging / DESCRIPTOR).write_text(json.dumps(descriptor, indent=2), encoding="utf-8")
             os.replace(staging, base / version)
