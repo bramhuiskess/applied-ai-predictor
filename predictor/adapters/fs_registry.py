@@ -22,6 +22,7 @@ from predictor.core.ports import LoadedModel, ModelRunner
 
 DESCRIPTOR = "descriptor.json"
 SCHEMA = "feature_schema.json"
+SUPPORT = "support.json"
 
 RunnerFactory = Callable[[Path, dict[str, Any]], ModelRunner]
 
@@ -53,7 +54,9 @@ class FilesystemRegistry:
         if factory is None:
             raise LookupError(f"{use_case_id} v{version}: no runner installed for {descriptor['runner']!r}")
         runner = factory(directory / descriptor["artifact"], descriptor)
-        return LoadedModel(descriptor=descriptor, feature_schema=schema, runner=runner)
+        support_path = directory / SUPPORT
+        support = json.loads(support_path.read_text(encoding="utf-8")) if support_path.is_file() else None
+        return LoadedModel(descriptor=descriptor, feature_schema=schema, runner=runner, support=support)
 
     def publish(
         self,

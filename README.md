@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 164 tests, die draaien ook op GitHub Actions
+- 178 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -64,7 +64,11 @@ en waar het altijd geldt welke kant op ("meer lamplicht = minder gas"). Daarna r
 (`POST /models/{id}/scenario`) of laat je één knop over het hele bereik lopen (`/scenario/sweep`). Je krijgt
 het verschil met nu in eenheden, procenten en euro's, en of dat verschil groter is dan de foutmarge van het model:
 
-> 1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292).
+> 1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292). Based on only 7 comparable batches in the
+> history; treat the size of the effect with some care.
+
+Elk scenario zegt ook hoeveel vergelijkbare gevallen er in de historie zijn. Bij weinig vergelijkbare
+gevallen is de voorspelling 3 tot 4 keer minder nauwkeurig, en dat zie je dan ook staan.
 
 Zie [`docs/scenarios.md`](docs/scenarios.md).
 

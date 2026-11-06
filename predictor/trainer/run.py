@@ -15,6 +15,7 @@ from sklearn.base import clone
 
 from predictor.adapters.fs_registry import FilesystemRegistry
 from predictor.adapters.sources import adapter_for, read_table
+from predictor.core.certainty import build_support
 from predictor.core.manifest import MANIFEST_FILENAME, Manifest, load_manifest
 from predictor.trainer import models
 from predictor.trainer.export import check_parity, make_thresholds_float32_safe, to_onnx
@@ -130,6 +131,20 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "environment": _environment(),
     }
 
+    # Map of the training data for "comparable cases" in scenarios. Only where it is needed
+    # (a scenario section) and allowed (it holds transformed training rows: no personal data by default).
+    support_file: dict[str, str] = {}
+    if manifest.scenario is not None:
+        if manifest.policy.evaluation_rows_allowed:
+            support = build_support(X_fit.to_numpy(dtype="float64"), [f.kind for f in data.features], feature_names,
+                                    [f.categories for f in data.features], descriptor["feature_importance"])
+            support_file["support.json"] = json.dumps(support)
+            descriptor["certainty"] = {"available": True, "training_rows": support["rows"],
+                                       "radius": round(support["radius"], 6)}
+        else:
+            descriptor["certainty"] = {"available": False,
+                                       "reason": "not stored for use cases with personal data"}
+
     artifact = to_onnx(chosen["model"], len(feature_names), task)
     parity = check_parity(chosen["model"], artifact, X_test, descriptor)
     descriptor["parity"] = parity
@@ -142,7 +157,7 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         feature_schema=schema,
         artifact_name=ARTIFACT_NAME,
         artifact=artifact,
-        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2)},
+        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2), **support_file},
     )
     report_path = registry.root / manifest.use_case_id / version / "report.md"
     report_path.write_text(render_report(manifest, {**descriptor, "model_version": version}), encoding="utf-8")

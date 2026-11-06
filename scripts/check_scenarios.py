@@ -153,6 +153,35 @@ def compare_verdicts(nursery, batches: list[dict], df: pd.DataFrame, service, te
     return pd.DataFrame(out)
 
 
+def compare_certainty(nursery, batches: list[dict], df: pd.DataFrame, service, test_from: str,
+                      sample: int = 60, seed: int = 0) -> pd.DataFrame:
+    """Is a scenario with more comparable batches really more accurate? Sweeps vs. the answer key."""
+    by_id = {b["batch_id"]: b for b in batches}
+    test = df[df["start_date"] >= test_from].sample(min(sample, len(df)), random_state=seed)
+    rows = []
+    for output, use_case in MODELS.items():
+        info = service.describe(use_case)
+        order = info["feature_schema"]["x-feature-order"]
+        level = float(test[output].abs().mean())
+        for lever in info["scenario"]["levers"]:
+            for _, row in test.iterrows():
+                if lever["name"] == "light_hours" and row["lamp_type"] == "none":
+                    continue
+                features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+                body = service.sweep(use_case, {"features": features}, lever["name"])
+                b = by_id[row["batch_id"]]
+                base_true = nursery.simulate(b)[output]
+                for p in body["points"]:
+                    true = nursery.counterfactual(b, **{lever["name"]: p["value"]})[output] - base_true
+                    rows.append({"output": output, "level": p["certainty"]["level"],
+                                 "cases": p["certainty"]["comparable_cases"],
+                                 "effect_error_pct": abs(p["difference"][output]["change"] - true) / level * 100})
+    r = pd.DataFrame(rows)
+    order = {"low": 0, "medium": 1, "high": 2}
+    out = r.groupby(["output", "level"]).effect_error_pct.agg(points="count", mean="mean", median="median").reset_index()
+    return out.sort_values(["output", "level"], key=lambda s: s.map(order) if s.name == "level" else s)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--weather", choices=["knmi", "synthetic"], default="knmi")
@@ -162,6 +191,7 @@ def main() -> None:
     parser.add_argument("--sweeps", action="store_true", help="also compare whole lever sweeps (slower)")
     parser.add_argument("--sample", type=int, default=60, help="test batches used for --sweeps")
     parser.add_argument("--verdicts", action="store_true", help="check the margin rule (clear effect or not)")
+    parser.add_argument("--certainty", action="store_true", help="check that more comparable batches = smaller error")
     args = parser.parse_args()
 
     daily = (knmi.load_daily(nursery_mod.STATION, "2015-06-01", nursery_mod.END) if args.weather == "knmi"
@@ -176,6 +206,10 @@ def main() -> None:
     print(result.round(1).to_string(index=False))
     if args.json:
         args.json.write_text(result.to_json(orient="records", indent=2), encoding="utf-8")
+    if args.certainty:
+        result_c = compare_certainty(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
+        print("\nerror of the predicted scenario effect (% of the normal level) by certainty\n")
+        print(result_c.round(1).to_string(index=False))
     if args.verdicts:
         verdicts = compare_verdicts(nursery, batches, df, bootstrap.build_service(), test_from)
         print("\nverdicts of the scenario engine vs. the answer key\n")
