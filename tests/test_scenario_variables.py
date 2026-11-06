@@ -132,17 +132,19 @@ def test_report_lists_the_levers(trained):
     assert "## Scenario levers" in report and "| `lamps` | 1 - 15 | 0.5 | decreasing |" in report
 
 
-def test_linear_model_that_contradicts_a_declared_effect_cannot_win(tmp_path):
+def test_a_declared_effect_the_data_contradicts_is_held_at_zero(tmp_path):
     data = tmp_path / "kas.csv"
     greenhouse_data(data)
     m = manifest(data)
     # Deliberately wrong declaration: the data says lamps lower gas use.
     m["scenario"]["levers"]["lamps"]["effects"] = {"gas": "increasing"}
     result = train_use_case(write(tmp_path, m), bootstrap.build_registry(tmp_path / "models"))
-    assert result["algorithm"] == "lightgbm"
-    assert "linear_regression" in result["scenario_constraints"]["excluded_candidates"]
-    assert any("not eligible" in note for note in result["notes"])
-    # The exported LightGBM obeys the declaration even though the data disagrees.
+    constraints = result["scenario_constraints"]
+    assert constraints["excluded_candidates"] == {}          # the linear model is fitted with the sign fixed
+    if result["algorithm"] == "linear_regression":
+        assert constraints["held_at_zero"] == ["lamps"]
+        assert any("no effect of ['lamps']" in note for note in result["notes"])
+    # Whichever model won, the exported model obeys the declaration even though the data disagrees.
     model = bootstrap.build_registry(tmp_path / "models").resolve("kas")
     validator = FeatureValidator(model.feature_schema, reject_unknown_fields=False)
     rows = pd.read_csv(data).drop(columns=["gas"]).head(100).to_dict("records")

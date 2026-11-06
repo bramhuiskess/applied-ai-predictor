@@ -1,7 +1,7 @@
 """Candidate models per task and their evaluation (sub-question 4).
 
-Every use case gets a simple baseline and LightGBM; the better one on a
-validation split wins. Anomaly use cases get an Isolation Forest. Preprocessing
+Every use case gets a simple baseline and LightGBM (and for regression the
+average of the two, the "blend"); the best one on a validation split wins. Anomaly use cases get an Isolation Forest. Preprocessing
 lives inside the sklearn Pipeline, so it is exported together with the model.
 """
 
@@ -12,7 +12,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier, LGBMRegressor
-from sklearn.ensemble import IsolationForest
+from scipy.optimize import lsq_linear
+from sklearn.ensemble import IsolationForest, VotingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
@@ -42,12 +43,20 @@ class Split:
 
 
 def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.Series | None,
-               test_start: int | None = None) -> Split:
+               test_start: int | None = None, test_mask: np.ndarray | None = None) -> Split:
     """train / validation / test. Time-ordered data is split chronologically to avoid leakage.
 
     `test_start` (rows are sorted by time) fixes where the test set begins, for backtests.
     """
     index = np.arange(n)
+    if test_mask is not None:
+        # Whole groups are the test set; the rest is split into train and validation.
+        rest, test = index[~test_mask], index[test_mask]
+        if chronological:
+            n_val = int(round(len(rest) * 0.2))
+            return Split(rest[: len(rest) - n_val], rest[len(rest) - n_val:], test)
+        train, val = train_test_split(rest, test_size=0.2, random_state=SEED)
+        return Split(np.sort(train), np.sort(val), test)
     if chronological:
         n_test = n - test_start if test_start is not None else int(round(n * test_fraction))
         n_val = int(round((n - n_test) * 0.2))
@@ -59,16 +68,71 @@ def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.S
     return Split(np.sort(train), np.sort(val), np.sort(test))
 
 
+class SignConstrainedLinearRegression(LinearRegression):
+    """Least squares in which a declared effect fixes the sign of its coefficient.
+
+    "More heating temperature = more gas" is physics; when the data (with correlated
+    inputs) would give that coefficient the wrong sign, the coefficient becomes 0 instead
+    and the other coefficients are fitted around it. Prediction and ONNX export are those
+    of a normal linear regression. Inputs are standardised first, which keeps every sign.
+
+    A tiny ridge penalty keeps the solution unique when inputs are redundant (lamp power and
+    crop that always go together): without it the fit may return huge coefficients that cancel
+    out, which float32 serving cannot reproduce.
+    """
+
+    RIDGE = 1e-4   # per row, on standardised inputs: negligible unless inputs are redundant
+
+    def __init__(self, signs: list[int] | None = None) -> None:
+        super().__init__()
+        self.signs = signs
+
+    def fit(self, X, y, sample_weight=None):  # noqa: ARG002 - same signature as LinearRegression
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        signs = np.asarray(self.signs if self.signs is not None else [0] * X.shape[1])
+        lower = np.where(signs > 0, 0.0, -np.inf)
+        upper = np.where(signs < 0, 0.0, np.inf)
+        n, k = X.shape
+        design = np.vstack([np.hstack([X, np.ones((n, 1))]),
+                            np.hstack([np.sqrt(self.RIDGE * n) * np.eye(k), np.zeros((k, 1))])])  # intercept not penalised
+        target = np.concatenate([y, np.zeros(k)])
+        solution = lsq_linear(design, target, bounds=(np.append(lower, -np.inf), np.append(upper, np.inf)),
+                              lsmr_tol="auto", method="bvls" if k < 200 else "trf").x
+        self.coef_, self.intercept_ = solution[:-1], float(solution[-1])
+        self.n_features_in_ = X.shape[1]
+        return self
+
+
+def pinned_effects(model: Pipeline, names: list[str], monotone: list[int] | None) -> list[str]:
+    """Declared effects the data did not support: the constrained linear model set them to 0."""
+    est = model.named_steps.get("model")
+    if isinstance(est, VotingRegressor):
+        est = est.named_estimators_["linear"].named_steps["model"]
+    if not monotone or not isinstance(est, SignConstrainedLinearRegression):
+        return []
+    return [name for name, d, c in zip(names, monotone, est.coef_) if d and abs(c) < 1e-9]
+
+
 def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | None = None) -> dict[str, Pipeline]:
-    """`monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint."""
+    """`monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint and,
+    for regression, a sign constraint on the linear model's coefficients."""
     impute = ("impute", SimpleImputer(strategy="median", keep_empty_features=True))
     lgbm = dict(n_estimators=400, learning_rate=0.05, num_leaves=31, random_state=SEED, verbose=-1)
     if monotone and any(monotone):
         lgbm["monotone_constraints"] = monotone
     if task == "regression":
+        def linear():
+            return SignConstrainedLinearRegression(monotone) if monotone and any(monotone) else LinearRegression()
+        # The linear model extrapolates sensibly, the trees catch thresholds and interactions; on
+        # small real datasets their average is often better than either (both obey the declared
+        # effects, so the average does too).
+        blend = VotingRegressor([("linear", Pipeline([("scale", StandardScaler()), ("model", linear())])),
+                                 ("lightgbm", LGBMRegressor(**lgbm))])
         return {
-            "linear_regression": Pipeline([impute, ("scale", StandardScaler()), ("model", LinearRegression())]),
+            "linear_regression": Pipeline([impute, ("scale", StandardScaler()), ("model", linear())]),
             "lightgbm": Pipeline([impute, ("model", LGBMRegressor(**lgbm))]),
+            "blend": Pipeline([impute, ("model", blend)]),
         }
     if task == "classification":
         return {
@@ -136,6 +200,28 @@ def effect_violations(model: Pipeline, names: list[str], monotone: list[int] | N
             for name, d, c in zip(names, monotone, coef) if d and c and np.sign(c) != d]
 
 
+SIMPLICITY = ["linear_regression", "logistic_regression", "blend", "lightgbm"]
+
+
+def one_standard_error_choice(task: str, validation: dict[str, dict[str, float]], best: str) -> str:
+    """The simplest candidate whose cross-validated score is within one standard error of the best.
+
+    A textbook rule (Hastie, Tibshirani & Friedman, The Elements of Statistical Learning, 7.10):
+    with few groups the difference between candidates is often noise, and a simpler model
+    extrapolates more predictably. For scenarios it matters doubly: a tree model can show a
+    lever as having no effect at all because its prediction is flat between two splits.
+    """
+    metric, direction = PRIMARY_METRIC[task]
+    if metric is None or f"{metric}_se" not in validation[best]:
+        return best
+    limit = validation[best][metric] + (1 if direction == "lower" else -1) * validation[best][f"{metric}_se"]
+    for name in sorted(validation, key=lambda n: SIMPLICITY.index(n) if n in SIMPLICITY else len(SIMPLICITY)):
+        score = validation[name][metric]
+        if (score <= limit) if direction == "lower" else (score >= limit):
+            return name
+    return best
+
+
 def is_better(task: str, a: dict[str, float], b: dict[str, float] | None) -> bool:
     if b is None:
         return True
@@ -145,6 +231,11 @@ def is_better(task: str, a: dict[str, float], b: dict[str, float] | None) -> boo
 
 def feature_importance(model: Pipeline, names: list[str]) -> dict[str, float] | None:
     est = model.named_steps["model"]
+    if isinstance(est, VotingRegressor):   # the average of both parts' shares
+        parts = [feature_importance(Pipeline([("model", e if not isinstance(e, Pipeline) else e.named_steps["model"])]), names)
+                 for e in est.estimators_]
+        merged = {n: sum(p.get(n, 0.0) for p in parts if p) / len(parts) for n in names}
+        return {n: round(v, 4) for n, v in sorted(merged.items(), key=lambda t: -t[1])}
     if isinstance(est, (LGBMRegressor, LGBMClassifier)):
         gain = est.booster_.feature_importance(importance_type="gain")
     elif isinstance(est, (LinearRegression, LogisticRegression)):
@@ -167,5 +258,6 @@ def describe_algorithm(name: str) -> str:
         "linear_regression": "Linear regression (baseline)",
         "logistic_regression": "Logistic regression (baseline)",
         "lightgbm": "LightGBM gradient-boosted trees",
+        "blend": "Blend: average of the linear model and LightGBM",
         "isolation_forest": "Isolation Forest (unsupervised anomaly detection)",
     }.get(name, name)

@@ -17,9 +17,12 @@ from skl2onnx.common.shape_calculator import (
     calculate_linear_classifier_output_shapes,
     calculate_linear_regressor_output_shapes,
 )
+from skl2onnx.operator_converters.linear_regressor import convert_sklearn_linear_regressor
+from sklearn.ensemble import VotingRegressor
 from sklearn.pipeline import Pipeline
 
 from predictor.adapters.onnx_runner import OnnxRunner
+from predictor.trainer.models import SignConstrainedLinearRegression
 
 TARGET_OPSET = {"": 17, "ai.onnx.ml": 3}
 PARITY_RTOL = 1e-4
@@ -34,6 +37,12 @@ update_registered_converter(
     options={"split": None},
 )
 
+# Only the fitting differs; the fitted model is an ordinary linear regression.
+update_registered_converter(
+    SignConstrainedLinearRegression, "SignConstrainedLinearRegression", calculate_linear_regressor_output_shapes,
+    convert_sklearn_linear_regressor,
+)
+
 
 def make_thresholds_float32_safe(model: Pipeline) -> None:
     """Snap LightGBM split thresholds down to the nearest float32.
@@ -44,8 +53,13 @@ def make_thresholds_float32_safe(model: Pipeline) -> None:
     always sends float32, so predictions are unchanged.
     """
     est = model.named_steps["model"]
-    if not isinstance(est, (LGBMRegressor, LGBMClassifier)):
-        return
+    parts = est.estimators_ if isinstance(est, VotingRegressor) else [est]   # a blend holds a LightGBM too
+    for part in parts:
+        if isinstance(part, (LGBMRegressor, LGBMClassifier)):
+            _snap_thresholds(part)
+
+
+def _snap_thresholds(est: LGBMRegressor | LGBMClassifier) -> None:
     text = est.booster_.model_to_string()
 
     def snap(match: re.Match[str]) -> str:

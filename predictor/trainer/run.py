@@ -10,6 +10,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from sklearn.base import clone
 
@@ -50,8 +51,14 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         if test_start < 50 or len(data.X) - test_start < 10:
             raise TrainingError(f"test_from {cfg.test_from} leaves {test_start} rows to train on and "
                                 f"{len(data.X) - test_start} to test on; pick another date")
+    test_mask = None
+    if cfg.test_group:
+        test_mask = data.groups.isin([str(v) for v in cfg.test_group.values]).to_numpy()
+        if test_mask.sum() < 10 or (~test_mask).sum() < 50:
+            raise TrainingError(f"test_group {cfg.test_group.values} leaves {int((~test_mask).sum())} rows to train on "
+                                f"and {int(test_mask.sum())} to test on")
     split = models.make_split(len(data.X), cfg.test_fraction, data.chronological,
-                              data.y if task == "classification" else None, test_start)
+                              data.y if task == "classification" else None, test_start, test_mask)
     X_train, X_val, X_test = (data.X.iloc[idx] for idx in (split.train, split.val, split.test))
     y_train = y_val = y_test = None
     if data.y is not None:
@@ -64,13 +71,23 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     # split the validation part is the most recent data, which the final model must not miss.
     X_fit = pd.concat([X_train, X_val])
     y_fit = pd.concat([y_train, y_val]) if y_train is not None else None
+    # When the test is "a group the model never saw", choose the model on that same question:
+    # leave each training group out in turn (group cross-validation) instead of the last 20% in time.
+    fit_groups = None
+    if cfg.test_group and data.y is not None:
+        fit_groups = data.groups.iloc[np.concatenate([split.train, split.val])].reset_index(drop=True)
+        if fit_groups.nunique() < 3:
+            fit_groups = None
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
     excluded: dict[str, list[str]] = {}
     for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone).items():
-        pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
-        make_thresholds_float32_safe(pipeline)
-        val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds)
+        if fit_groups is not None:
+            val_metrics = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds)
+        else:
+            pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
+            make_thresholds_float32_safe(pipeline)
+            val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds)
         final = clone(pipeline).fit(X_fit.to_numpy(dtype="float32"), y_fit)
         make_thresholds_float32_safe(final)
         test_metrics = models.evaluate(task, final, X_test, y_test, label_test, bounds)
@@ -85,7 +102,18 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
             best_name, best_val = name, val_metrics
     if best_name is None:
         raise TrainingError(f"no candidate respects the declared scenario effects: {excluded}")
+    if fit_groups is not None:
+        simpler = models.one_standard_error_choice(task, {n: r["validation"] for n, r in results.items()
+                                                          if n not in excluded}, best_name)
+        if simpler != best_name:
+            data.notes.append(f"{simpler} is within one standard error of {best_name} in the cross-validation, so "
+                              f"the simpler model is used (smoother effects, less risk on a new {cfg.test_group.column})")
+            best_name = simpler
     chosen = results[best_name]
+    pinned = models.pinned_effects(chosen["model"], feature_names, monotone)
+    if pinned:
+        data.notes.append(f"the data shows no effect of {pinned} in the declared direction, so the linear model "
+                          "holds it at 0 (more data on those levers would help)")
     suspects = _leakage_suspects(data, X_train, y_train, cfg.target if cfg.horizon_steps else None)
     if suspects:
         data.notes.append(
@@ -119,10 +147,13 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         "feature_importance": models.feature_importance(chosen["model"], feature_names),
         "scenario_constraints": ({"effects": {n: ("increasing" if d > 0 else "decreasing")
                                               for n, d in zip(feature_names, monotone) if d},
-                                  "excluded_candidates": excluded} if monotone else None),
+                                  "excluded_candidates": excluded, "held_at_zero": pinned} if monotone else None),
         "split": {"chronological": data.chronological, "test_from": cfg.test_from.isoformat() if cfg.test_from else None,
+                  "test_group": cfg.test_group.model_dump() if cfg.test_group else None,
                   "train": len(split.train), "validation": len(split.val),
-                  "test": len(split.test)},
+                  "test": len(split.test),
+                  "validation_method": (f"leave one {cfg.test_group.column} out ({fit_groups.nunique()} folds)"
+                                        if fit_groups is not None else "hold-out")},
         "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
                                          split.test, manifest.policy.evaluation_rows_allowed),
         "notes": data.notes,
@@ -248,10 +279,14 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
         manifest.description,
         "",
         f"- Task: **{d['task_type']}**" + (f", target `{d['target_name']}`" if d.get("target_name") else ""),
-        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on the validation split, then retrained on train + validation)",
+        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on "
+        + (f"{d['split']['validation_method']} cross-validation" if d["split"].get("validation_method", "hold-out") != "hold-out"
+           else "the validation split") + ", then retrained on train + validation)",
         f"- Data: {d['dataset']['rows']} rows from `{d['dataset']['path']}`; split train/validation/test = "
         f"{d['split']['train']}/{d['split']['validation']}/{d['split']['test']}"
-        + (f" (backtest: test from {d['split']['test_from']})" if d["split"].get("test_from")
+        + (f" (test on unseen {d['split']['test_group']['column']}: {', '.join(d['split']['test_group']['values'])})"
+           if d["split"].get("test_group")
+           else f" (backtest: test from {d['split']['test_from']})" if d["split"].get("test_from")
            else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
         "",
@@ -280,8 +315,12 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
             lines.append(f"| `{name}` | {lever.min:g} - {lever.max:g} | {lever.step:g} | {effect} |")
         constraints = d.get("scenario_constraints")
         if constraints:
-            lines += ["", "Declared effects are hard monotone constraints for LightGBM; "
-                      "a linear model that contradicts them is not eligible."]
+            lines += ["", "Declared effects are hard constraints: monotone constraints for LightGBM and sign "
+                      "constraints for the linear model (a coefficient the data gives the wrong sign becomes 0). "
+                      "A model that still contradicts them is not eligible."]
+            if constraints.get("held_at_zero"):
+                lines.append(f"- held at 0 (no effect in the declared direction in the data): "
+                             f"{', '.join(f'`{n}`' for n in constraints['held_at_zero'])}")
             for name, why in constraints["excluded_candidates"].items():
                 lines.append(f"- `{name}` excluded: {'; '.join(why)}")
     p = d.get("parity")
@@ -292,6 +331,19 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
     if d.get("notes"):
         lines += ["", "## Notes", ""] + [f"- {n}" for n in d["notes"]]
     return "\n".join(lines) + "\n"
+
+
+def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, groups: pd.Series,
+                            bounds: tuple | None) -> dict[str, float]:
+    """Average metrics over folds that each leave one group (greenhouse, farm) out."""
+    folds = []
+    for group in groups.unique():
+        held = (groups == group).to_numpy()
+        model = clone(pipeline).fit(X[~held].to_numpy(dtype="float32"), y[~held])
+        folds.append(models.evaluate(task, model, X[held], y[held], None, bounds))
+    metrics = {k: float(np.mean([f[k] for f in folds])) for k in folds[0]}
+    metrics.update({f"{k}_se": float(np.std([f[k] for f in folds], ddof=1) / np.sqrt(len(folds))) for k in folds[0]})
+    return metrics
 
 
 def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_index,

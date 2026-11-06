@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-EXTRAS="${1:-train,dev}"
+EXTRAS="${1:-train,dev,datasets}"
 MIN_MINOR=11
 
 ok() { "$1" -c "import sys; sys.exit(0 if sys.version_info >= (3, $MIN_MINOR) else 1)" 2>/dev/null; }

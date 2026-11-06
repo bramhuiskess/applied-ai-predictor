@@ -31,7 +31,8 @@ sys.path.insert(0, str(ROOT))
 from predictor import bootstrap  # noqa: E402
 from predictor.core.validation import FeatureValidator  # noqa: E402
 
-MODELS = {"weeks_to_harvest": "nursery-harvest-weeks", "plants_sold": "nursery-plants-sold", "gas_m3": "nursery-gas"}
+MODELS = {"weeks_to_harvest": "nursery-harvest-weeks", "plants_sold": "nursery-plants-sold", "gas_m3": "nursery-gas",
+          "electricity_kwh": "nursery-electricity"}
 
 
 def predict(model, rows: list[dict]) -> np.ndarray:

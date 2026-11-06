@@ -46,18 +46,23 @@ Everything that is not a lever is **context** (weather, season, compartment): a 
 ### Declared effects are hard rules for the model
 
 `effects` become **monotone constraints** in LightGBM: whatever the situation, turning that lever
-up can only move the output the declared way. A linear model cannot be constrained, so it is
-checked instead: if it contradicts a declared effect it is not eligible to win. The training report
-lists the levers, the constraints, and any model that was excluded.
+up can only move the output the declared way. The linear model gets them as **sign constraints**:
+it is fitted by least squares with that coefficient forced to the declared side (≥ 0 or ≤ 0). If the
+data would give the wrong sign, the coefficient becomes 0 and the other coefficients are fitted
+around it; the report then says which effects the data did not support ("held at 0"). The fitted
+model is an ordinary linear regression, so the ONNX export is unchanged. (A classifier's logistic
+model is still only checked: if it contradicts a declared effect it is not eligible to win.)
 
 **Only declare what always holds.** In the simulated nursery, "more heating = more gas" is *not*
 true per batch: a warmer batch is ready sooner, and 14% of batches use less gas in total. So
 temperature is a lever without a declared effect, while lamp light, CO₂ and plant density do have
 one (`tests/test_scenario_variables.py` checks every declared effect against the simulator's answer key).
 
-This already matters in the nursery gas model: the linear baseline learned "more CO₂ = more gas",
-because growers dose CO₂ in winter, exactly when they heat. That is a correlation, not an effect, so
-the linear model was excluded and the constrained LightGBM won.
+This already matters in the nursery gas model: the free linear baseline learned "more CO₂ = more gas",
+because growers dose CO₂ in winter, exactly when they heat. That is a correlation, not an effect.
+On real greenhouse data the sign constraint also made the model *more accurate*: excluding the linear
+model there left a LightGBM with R² 0.18 on an unseen greenhouse; the sign-constrained linear model
+reaches 0.57. A blend of the two (their average) obeys declared effects too: the average of two functions that only go up also only goes up (see [datasets.md](datasets.md#4-real-greenhouse-data-autonomous-greenhouse-challenge-wur)).
 
 The result on test batches the models never saw:
 
