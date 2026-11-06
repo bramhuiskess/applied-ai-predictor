@@ -16,8 +16,10 @@ from predictor.core.policy import check_record, check_schema
 from predictor.core.scenario import (
     ResolvedRequest,
     check_scenario,
+    compare,
     describe_scenario,
     resolve_scenarios,
+    summarise,
     sweep_values,
 )
 from predictor.core.ports import LoadedModel, ModelRegistry
@@ -180,9 +182,19 @@ class PredictionService:
             **self._header(uc),
             "base": {"record_id": base.get("record_id"), "features": resolved.base,
                      "warnings": resolved.base_warnings, "outputs": outputs[0]},
-            "scenarios": [{"name": s.name, "changes": s.changes, "features": s.features, "warnings": s.warnings,
-                           "outputs": out} for s, out in zip(resolved.scenarios, outputs[1:])],
+            "scenarios": [self._scenario_result(uc, s.name, s.changes, s.features, s.warnings,
+                                                resolved.base, outputs[0], out)
+                          for s, out in zip(resolved.scenarios, outputs[1:])],
         }
+
+    @staticmethod
+    def _scenario_result(uc: UseCase, name: str, changes: list, features: dict, warnings: list,
+                         base_row: dict, base_out: dict, out: dict) -> dict[str, Any]:
+        cfg, descriptor = uc.manifest.scenario, uc.model.descriptor
+        comparison = compare(cfg, descriptor, base_row, base_out, features, out)
+        return {"name": name, "changes": changes, "features": features, "warnings": warnings, "outputs": out,
+                "difference": comparison["outputs"], "net_eur": comparison["net_eur"],
+                "summary": summarise(cfg, descriptor, name, comparison)}
 
     def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
               stop: float | None = None, step: float | None = None) -> dict[str, Any]:
@@ -206,8 +218,10 @@ class PredictionService:
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
                      "value": resolved.base[lever], "outputs": outputs[0]},
             "points": [{"value": v, "outputs": out,
+                        "difference": compare(uc.manifest.scenario, uc.model.descriptor, resolved.base, outputs[0],
+                                              s.features, out)["outputs"],
                         "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1]}
-                       for v, out in zip(values, outputs[1:])],
+                       for v, s, out in zip(values, resolved.scenarios, outputs[1:])],
         }
 
     def _scenario_use_case(self, use_case_id: str) -> UseCase:

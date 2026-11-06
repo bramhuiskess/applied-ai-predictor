@@ -175,7 +175,9 @@ def test_model_metadata_describes_the_levers(trained):
     assert levers["setpoint"]["beyond_training_data"] is True   # max 25, the data stops at 23
     assert levers["lamps"]["beyond_training_data"] is False
     assert levers["lamps"]["label"] == "lamps"                   # falls back to the column name
-    assert scenario["outputs"] == [{"name": "gas", "label": "Gas", "unit": None, "value_eur": -0.45}]
+    [output] = scenario["outputs"]
+    assert {k: output[k] for k in ("name", "label", "unit", "value_eur")} == {
+        "name": "gas", "label": "Gas", "unit": None, "value_eur": -0.45}
     assert scenario["constraints"]["effects"]["lamps"] == "decreasing"
 
 

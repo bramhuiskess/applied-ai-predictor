@@ -91,7 +91,8 @@
     "outputs": {
       "gas_m3": {
         "label": "Gas use",
-        "value_eur": -0.45
+        "price_from": "gas_price_eur_m3",
+        "is_cost": true
       }
     }
   }

@@ -31,6 +31,10 @@ def check_scenario(use_case_id: str, scenario: ScenarioConfig | None, feature_sc
                                 "only numeric and yes/no inputs can be levers")
         if prop.get("x-kind") == "binary" and (lever.min, lever.max, lever.step) != (0, 1, 1):
             raise ManifestError(f"{use_case_id}: scenario lever {name!r} is yes/no, so use min 0, max 1, step 1")
+    for name, output in scenario.outputs.items():
+        if output.price_from and properties.get(output.price_from, {}).get("x-kind") not in ("number", "integer"):
+            raise ManifestError(f"{use_case_id}: scenario output {name!r} takes its price from {output.price_from!r}, "
+                                "which is not a numeric input of the trained model")
 
 
 def describe_scenario(scenario: ScenarioConfig | None, feature_schema: dict[str, Any],
@@ -61,7 +65,10 @@ def describe_scenario(scenario: ScenarioConfig | None, feature_schema: dict[str,
         config = scenario.outputs.get(name)
         outputs.append({"name": name, "label": (config.label if config and config.label else name),
                         "unit": descriptor.get("target_unit"),
-                        "value_eur": config.value_eur if config else None})
+                        "value_eur": config.value_eur if config else None,
+                        "price_from": config.price_from if config else None,
+                        "is_cost": config.is_cost if config else False,
+                        "margin": margin_of_error(descriptor)})
     return {"levers": levers, "outputs": outputs,
             "constraints": descriptor.get("scenario_constraints")}
 
@@ -193,3 +200,102 @@ def sweep_values(scenario: ScenarioConfig, lever_name: str, start: float | None,
     if stop - values[-1] > _EPSILON:
         values.append(stop)  # always include the end of the range
     return [int(v) if float(v).is_integer() else v for v in values], []
+
+
+# --------------------------------------------------------------------------- difference base vs. scenario (ticket 5)
+
+def margin_of_error(descriptor: dict[str, Any]) -> float | None:
+    """The model's typical error on one prediction (test MAE), for regression."""
+    if descriptor.get("task_type") != "regression":
+        return None
+    mae = (descriptor.get("metrics") or {}).get("mae")
+    return round(float(mae), 6) if mae is not None else None
+
+
+def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict[str, Any],
+            base_out: dict[str, Any], row: dict[str, Any], out: dict[str, Any]) -> dict[str, Any]:
+    """What changes from the base to a scenario, per output, in units, %, euros and against the margin."""
+    result: dict[str, Any] = {}
+    money: list[float] = []
+    for name, now in out.items():
+        before = base_out[name]
+        config = scenario.outputs.get(name)
+        if "probabilities" in now:
+            result[name] = _compare_classes(before, now)
+            continue
+        change = round(now["value"] - before["value"], 6)
+        item: dict[str, Any] = {
+            "base": before["value"],
+            "scenario": now["value"],
+            "change": change,
+            "change_pct": round(change / abs(before["value"]) * 100, 2) if before["value"] else None,
+        }
+        eur = _money(config, row, now["value"]) - _money(config, base_row, before["value"]) if _priced(config) else None
+        item["eur"] = round(eur, 2) if eur is not None else None
+        if eur is not None:
+            money.append(eur)
+        margin = margin_of_error(descriptor)
+        item["margin"] = margin
+        item["exceeds_margin"] = None if margin is None else abs(change) >= margin
+        result[name] = item
+    return {"outputs": result, "net_eur": round(sum(money), 2) if money else None}
+
+
+def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, comparison: dict[str, Any]) -> str:
+    """One plain sentence per scenario, for people who do not read JSON."""
+    parts = []
+    for output, item in comparison["outputs"].items():
+        config = scenario.outputs.get(output)
+        label = (config.label if config and config.label else output).lower()
+        unit = descriptor.get("target_unit") or ""
+        if "positive_class" in item:  # a yes/no or category output
+            parts.append(f"the chance of {label} = {item['positive_class']} goes from "
+                         f"{item['base_probability']:.0%} to {item['scenario_probability']:.0%}")
+            continue
+        if item["change"] == 0:
+            parts.append(f"{label} does not change")
+            continue
+        direction = "higher" if item["change"] > 0 else "lower"
+        size = f"{label} {abs(item['change_pct']):.1f}% {direction}" if item["change_pct"] is not None \
+            else f"{label} {direction}"
+        detail = f"{item['change']:+,.{_decimals(item['change'])}f} {unit}".strip()
+        if item["eur"] is not None:  # positive = better for the grower (more income or lower cost)
+            detail += f", worth {'+' if item['eur'] >= 0 else '-'}€{abs(item['eur']):,.0f}"
+        sentence = f"{size} ({detail})"
+        if item["exceeds_margin"] is False:
+            sentence += (f"; this is within the model's typical error of ±{item['margin']:,.{_decimals(item['margin'])}f} "
+                         f"{unit}, so treat it as no clear effect").rstrip()
+        parts.append(sentence)
+    text = f"{name}: " + "; ".join(parts)
+    if comparison["net_eur"] is not None and len(comparison["outputs"]) > 1:
+        text += f". Net worth {'+' if comparison['net_eur'] >= 0 else '-'}€{abs(comparison['net_eur']):,.0f}"
+    return text + "."
+
+
+def _priced(config) -> bool:
+    return config is not None and (config.value_eur is not None or bool(config.price_from))
+
+
+def _money(config, row: dict[str, Any], value: float) -> float:
+    if config.value_eur is not None:
+        return value * config.value_eur
+    price = float(row[config.price_from])
+    return value * price * (-1 if config.is_cost else 1)
+
+
+def _compare_classes(before: dict[str, Any], now: dict[str, Any]) -> dict[str, Any]:
+    classes = list(before["probabilities"])
+    positive = classes[-1]  # for yes/no outcomes the "yes" class sorts last ("1", "true", "yes")
+    return {
+        "base": before["value"],
+        "scenario": now["value"],
+        "label_changed": before["value"] != now["value"],
+        "positive_class": positive,
+        "base_probability": before["probabilities"][positive],
+        "scenario_probability": now["probabilities"][positive],
+        "probability_change": {c: round(now["probabilities"][c] - before["probabilities"][c], 6) for c in classes},
+    }
+
+
+def _decimals(value: float) -> int:
+    return 0 if abs(value) >= 100 else 1 if abs(value) >= 1 else 2
