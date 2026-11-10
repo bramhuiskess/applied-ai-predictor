@@ -48,7 +48,7 @@ python scripts/make_nursery.py && python scripts/make_arable.py   # scenario dat
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 321 tests, ~95 s, fully offline
+pytest                            # 376 tests, ~2.5 min, fully offline
 ```
 
 ### Technical notebook
@@ -87,9 +87,10 @@ columns that look like personal data. `train` then:
 6. **checks parity**: the ONNX model, run through the real serving runner, must match the original;
    it also warns about probable **target leakage** (a feature that on its own determines the target,
    such as AI4I's failure-mode columns, which `init` cannot know are derived from the target);
-7. publishes a new version in `models/<use_case>/<version>/` with `descriptor.json`,
-   `feature_schema.json`, `model.onnx` and a human-readable `report.md` (and, with joins, `joins.json` and
-   `lookups/`).
+7. publishes a new version in `models/<use_case>/<version>/`: `use_case.json`, `feature_schema.json`,
+   a human-readable `report.md` and one folder per output with its `model.onnx` and `descriptor.json`
+   (`<output>/model.onnx`, `<output>/descriptor.json`; a use case with one output has one folder), and, with joins,
+   `joins.json` and `lookups/`.
 
 With `joins` in the manifest, step 0 connects the lookup tables to the base table and checks the keys, see
 [Joining datasets](#joining-datasets).
@@ -189,7 +190,7 @@ predictor/
 │   └── monitoring.py    counters + structured logs (feature values only if allowed)
 ├── adapters/        technology behind the ports
 │   ├── onnx_runner.py   ONNX Runtime (CPU)
-│   ├── fs_registry.py   versioned models on the filesystem, atomic publish
+│   ├── fs_registry.py   versioned models on the filesystem (a folder per output with model.onnx + descriptor.json), atomic publish
 │   └── sources.py       csv-file, jsonl-file, parquet-file readers
 ├── trainer/         profiling, joins (join.py), model candidates, ONNX export and parity check
 ├── bootstrap.py     composition root: the only place that wires core to adapters
@@ -219,9 +220,16 @@ also works in the offline container, and it adapts to every use case from the AP
   filled in. All of it is built from `GET /models/{id}` (`joins`, `inputs[].derived_by`) and the `filled_in` field of a
   prediction, so a new dataset with joins needs no dashboard code. Use cases without joins look exactly as before.
 
+A use case with several outputs (see [Several outputs](#several-outputs)) gets **output chips** under its
+title. Choosing a chip switches the summary, the headline figures, the charts, "Why this model?" and the
+importance chart to that output; the inputs of "Try it yourself" are shared, and an **All outputs** list in
+that panel shows the answer for every output with its unit. Use cases with one output show no chips and
+look as before. Entries of `/use-cases` that have an `alias_of` (the old ids of a merged use case) are
+hidden from the tabs.
+
 For the in-depth version of the same story, see the technical notebook below.
 
-The charts use a small sample that `predictor train` stores in `descriptor.json`. For use cases
+The charts use a small sample that `predictor train` stores in each output's `descriptor.json`. For use cases
 with personal data only aggregates are stored, unless the manifest sets
 `policy.publish_evaluation_rows: true` (e.g. for synthetic or public data). Models trained before this
 existed still work; retrain them to see the charts.
@@ -231,9 +239,9 @@ existed still work; retrain them to see the charts.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | liveness + number of ready use cases |
-| GET | `/use-cases` | all use cases with status (`ready` / `not_trained`) |
-| GET | `/models/{id}` | metadata: inputs, kinds, units, training ranges, metrics, policy, JSON Schema |
-| GET | `/models/{id}/evaluation` | model comparison, feature importance and a test-set sample for charts |
+| GET | `/use-cases` | all use cases with status (`ready` / `not_trained`), their `outputs` and `alias_of` |
+| GET | `/models/{id}` | metadata: inputs, kinds, units, training ranges, metrics, policy, JSON Schema, and `outputs` |
+| GET | `/models/{id}/evaluation` | model comparison, feature importance and a test-set sample for charts, and `outputs` |
 | POST | `/models/{id}/scenario/check` | check a scenario request (base + up to 20 scenarios) and return what would be calculated, see [scenarios.md](scenarios.md) |
 | POST | `/models/{id}/scenario` | calculate the base and up to 20 scenarios, with the difference in units, %, euros and against the margin of error |
 | POST | `/models/{id}/scenario/sweep` | slide one lever over a range and calculate every point |
@@ -253,6 +261,28 @@ curl -X POST localhost:8000/models/greenhouse-climate/predict -H 'content-type: 
  "task_type": "regression", "target_name": "inside_temp_c (+6 steps)", "target_unit": "°C",
  "predictions": [{"record_id": "obs-1", "prediction": 21.488338, "warnings": []}]}
 ```
+
+With several outputs (see below) the item has no flat `prediction`; it has an `outputs` map instead, and the
+response header lists the outputs:
+
+```json
+{"schema_version": "1.0", "use_case_id": "nursery", "model_version": "3",
+ "task_type": "regression", "target_name": "weeks_to_harvest", "target_unit": "weeks",
+ "outputs": {"weeks_to_harvest": {"task_type": "regression", "target_name": "weeks_to_harvest", "target_unit": "weeks"},
+             "gas_m3": {"task_type": "regression", "target_name": "gas_m3", "target_unit": "m³"}},
+ "predictions": [{"record_id": "K07 week 42", "warnings": [],
+                  "outputs": {"weeks_to_harvest": {"prediction": 11.8}, "gas_m3": {"prediction": 25310.0}}}]}
+```
+
+A use case with one output returns exactly the flat shape above, so existing clients keep working. The
+top-level `task_type`, `target_name` and `target_unit` of the header describe the first output.
+`GET /models/{id}` and `/evaluation` keep their top-level keys (they describe the **first** output) and add
+`outputs`, a map `name -> {task_type, algorithm, target_name, target_unit, classes, metrics}` (the evaluation
+has `candidates`, `reference`, `feature_importance`, `split` and `sample` per output instead of `classes`).
+It is always present, with one entry for a use case with one output. Inputs, policy, joins and the feature
+schema are shared by all outputs. `/use-cases` lists `outputs` (the names, `null` when not trained) and
+`alias_of` (`null`, or `{"use_case_id": "nursery", "output": "gas_m3"}` for an alias). An alias id such as
+`/models/nursery-gas/...` answers with the flat single-output shapes of that output, as before.
 
 Classification responses add `probabilities`; anomaly responses return `"anomaly"`/`"normal"`
 plus an `anomaly_score` (lower = more unusual). Inputs outside the range seen in training
@@ -289,9 +319,12 @@ an unknown category, or NaN/Infinity.
     "evaluation_label": null,                   // anomaly only: a label used just for scoring
     "anomaly_share": 0.05,
     "test_fraction": 0.2,
-    "units": { "absence_pct": "%" }
+    "units": { "absence_pct": "%" },
+    "outputs": {}                               // instead of "target": a dict name -> {task, unit, target_min, target_max,
+                                                // baseline, algorithms}, see "Several outputs"
   },
-  "model": { "runner": "onnx", "version": "latest" },
+  "model": { "runner": "onnx", "version": "latest",
+             "algorithms": null },              // default models for every output, e.g. ["lightgbm"]; omitted = baseline vs. LightGBM
   "policy": {
     "contains_personal_data": true,
     "special_category_data": true,
@@ -308,7 +341,8 @@ an unknown category, or NaN/Infinity.
     "outputs": { "gas_m3": { "label": "Gas use", "price_from": "gas_price_eur_m3", "is_cost": true } },
     "case_label": "batches"                     // "based on 14 comparable batches in the history"
                                                 // or a fixed "value_eur" per unit (negative for a cost)
-  }
+  },
+  "aliases": {}                                 // old use-case ids that keep working, see "Several outputs"
 }
 ```
 
@@ -316,6 +350,102 @@ Unknown keys, typos and inconsistent combinations are rejected at startup, which
 configuration debt. The policy is enforced twice: training refuses a dataset that contains
 a forbidden column, and the API refuses requests that contain one or describe a group
 smaller than `min_group_size`.
+
+## Several outputs
+
+One use case can predict several outputs from the same inputs, for example a nursery batch: weeks to
+harvest, plants sold, gas and electricity. Declare the inputs, joins, policy and levers once, train once,
+and get one model per output in one request. Instead of `training.target`, give `training.outputs`:
+
+```json
+{
+  "manifest_version": "1.0",
+  "use_case_id": "nursery",
+  "description": "Nursery batches: four outputs from the same climate decisions",
+  "data_source": { "adapter": "csv-file", "path": "data/nursery.csv" },
+  "training": {
+    "time_column": "start_date",
+    "drop_columns": ["batch_id", "compartment"],
+    "outputs": {
+      "weeks_to_harvest": { "unit": "weeks" },
+      "plants_sold":      { "unit": "plants" },
+      "gas_m3":           { "unit": "m³", "target_min": 0, "algorithms": ["lightgbm"] },
+      "electricity_kwh":  { "unit": "kWh", "target_min": 0, "algorithms": ["blend", "lightgbm"] }
+    }
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "policy": { "contains_personal_data": false },
+  "aliases": {
+    "nursery-gas": "gas_m3", "nursery-harvest-weeks": "weeks_to_harvest",
+    "nursery-plants-sold": "plants_sold", "nursery-electricity": "electricity_kwh"
+  }
+}
+```
+
+**Output fields.** Each entry of `outputs` has `task` (`auto` by default), `unit`, `target_min`, `target_max`,
+`baseline` and `algorithms`, with the same meaning as in the single-output form. `target: "x"` stays as the
+shorthand for exactly one output named `x`; a use case without `outputs` behaves exactly as before.
+The first output in the manifest is the primary one: it fills the top-level keys of `/models/{id}`
+(`target_name`, `metrics`, ...) and the flat fields of the one-output shapes.
+
+**Outputs are never features of each other.** Training removes the other outputs from the features of every
+model, so there is no leakage between them. A real dependency (weeks to harvest drives gas) is not modelled.
+
+**Rules** (checked at startup):
+
+- use `target` **or** `outputs`, not both; with `outputs` the top-level `task`, `target_min`, `target_max`
+  and `baseline` must stay unset (they go inside each output);
+- no `horizon_steps` and no anomaly detection (no `evaluation_label`) with `outputs` yet;
+- an output is not the `time_column`, the `evaluation_label`, a `drop_columns` entry, a `rename_columns`
+  key (the name before renaming), or a column created by `joins`; an output name is used as a folder name, so
+  letters, digits, `_` and `-` only, and not `lookups`, `report.md`, `feature_schema.json`, `use_case.json`,
+  `support.json`, `joins.json` or `manifest.snapshot.json`;
+- `baseline.column` and `test_group.column` may not name an output (an output is never an input).
+
+**Choosing the model per output.** `algorithms` on an output (or `model.algorithms` as the default for all
+outputs): one name **forces** that model, several names **restrict** the contest to those, omitted keeps
+today's behaviour (baseline against LightGBM, the better one on validation wins). Valid names per task:
+
+| Task | Names |
+|---|---|
+| regression | `linear_regression`, `lightgbm`, `blend` |
+| classification | `logistic_regression`, `lightgbm` |
+| anomaly | `isolation_forest` |
+
+An unknown name stops startup and lists the valid ones. A name on an output must exist for that output's
+task; if the task is `auto` this is checked when training starts, **before** the first output is trained. The
+default `model.algorithms` is cut down to the names that exist for each output's task (a default with
+`linear_regression` and `logistic_regression` serves a regression and a classification output alike), and a
+manifest is rejected when the default leaves an output with an explicit task without any model. A forced model that
+contradicts the `effects` declared in the scenario (for example a model that learns "more CO₂ = more gas"
+where "decreasing" is declared) stops training with "no candidate respects the declared effects" instead of
+silently using another model.
+
+**Aliases.** `aliases` maps an old use-case id to one output: `{"nursery-gas": "gas_m3"}`. The alias keeps the
+URLs, the flat single-output response shapes and the scenario results of the old use case unchanged
+(`/models/nursery-gas/predict` answers like before). An alias must be a slug, must not equal another use
+case id, and must name an output. Aliases show up in `/use-cases` with `alias_of`; the dashboard hides them as tabs but an old link such as `#nursery-gas` still opens that output.
+
+**One training run, one version.** `predictor train nursery` reads and joins the data once, trains one
+independent model per output on the same inputs, and publishes **one version** for all of them:
+
+```
+models/nursery/<version>/
+├── use_case.json  feature_schema.json  report.md  (support.json, joins.json, ... as for any use case)
+├── weeks_to_harvest/   model.onnx  descriptor.json
+├── plants_sold/        model.onnx  descriptor.json
+├── gas_m3/             model.onnx  descriptor.json
+└── electricity_kwh/    model.onnx  descriptor.json
+```
+
+The feature schema, the "comparable cases" support and the join snapshot are written once, from the first
+output, and shared by all outputs. The inputs are profiled **once on all rows** (so every output reads the same
+category codes, kinds and ranges even when an output misses rows that another has). `report.md` has one section per output (candidates, chosen model, what
+`algorithms` allowed, importance, parity). Retraining replaces all outputs together; there is no per-output
+retraining. Versions trained before this layout (a `descriptor.json` and `model.onnx` in the version root) still
+load, as a use case with one output. Each output drops its own rows with a missing target, but all outputs share
+one list of inputs, encoded the same way; a safety check stops training with an error naming the output and the
+differing inputs if that is ever not the case (one request is validated against one schema). Training time grows with the number of outputs.
 
 ## Measured results (validation for the portfolio)
 

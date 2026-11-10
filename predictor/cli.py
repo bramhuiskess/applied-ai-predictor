@@ -67,7 +67,9 @@ def _init(args: argparse.Namespace) -> int:
 def _train(args: argparse.Namespace) -> int:
     from predictor.trainer.run import train_use_case
 
-    targets = args.use_cases or [m.use_case_id for m in bootstrap.load_manifests()]
+    manifests = bootstrap.load_manifests()
+    parents = {alias: m.use_case_id for m in manifests for alias in m.aliases}  # training an alias trains its use case
+    targets = list(dict.fromkeys(parents.get(t, t) for t in args.use_cases)) or [m.use_case_id for m in manifests]
     if args.data and len(targets) != 1:
         print("--data can only be used with a single use case", file=sys.stderr)
         return 2
@@ -77,14 +79,17 @@ def _train(args: argparse.Namespace) -> int:
         if not path.exists():
             path = bootstrap.usecases_dir() / target / MANIFEST_FILENAME
         result = train_use_case(path, registry, args.data)
-        metrics = ", ".join(f"{k}={v:.4f}" for k, v in result["metrics"].items())
-        print(f"{result['use_case_id']}: v{result['model_version']} {result['algorithm']} ({metrics}) "
-              f"parity max diff {result['parity']['max_abs_diff']:.1e}")
+        several = len(result["outputs"]) > 1
+        for name, d in result["outputs"].items():
+            metrics = ", ".join(f"{k}={v:.4f}" for k, v in d["metrics"].items())
+            label = f"{result['use_case_id']} [{name}]" if several else result["use_case_id"]
+            print(f"{label}: v{result['model_version']} {d['algorithm']} ({metrics}) "
+                  f"parity max diff {d['parity']['max_abs_diff']:.1e}")
+            for note in d["notes"]:
+                if note.startswith("WARNING"):
+                    print(f"  {note}")
         for join in result.get("joins", []):
             print(f"  join {join['name']}: {join.get('matched', 0):.1%} matched, {join.get('dropped_rows', 0)} rows dropped")
-        for note in result["notes"]:
-            if note.startswith("WARNING"):
-                print(f"  {note}")
         print(f"  report: {result['report']}")
     return 0
 
@@ -112,7 +117,9 @@ def _check_joins(args: argparse.Namespace) -> int:
         return 0
     if args.use_cases:
         paths = []
+        parents = {alias: m.use_case_id for m in bootstrap.load_manifests() for alias in m.aliases}
         for target in args.use_cases:
+            target = parents.get(target, target)  # an alias is checked through its use case
             path = Path(target)
             paths.append(path if path.exists() else bootstrap.usecases_dir() / target / MANIFEST_FILENAME)
         manifests = [load_manifest(p) for p in paths]
@@ -145,7 +152,10 @@ def _list(_: argparse.Namespace) -> int:
     for manifest in bootstrap.load_manifests():
         versions = registry.versions(manifest.use_case_id)
         state = f"versions {', '.join(versions)}" if versions else "not trained"
-        print(f"{manifest.use_case_id:<24} {state:<20} {manifest.description}")
+        outputs = f" [{', '.join(manifest.training.outputs)}]" if len(manifest.training.outputs) > 1 else ""
+        print(f"{manifest.use_case_id:<24} {state:<20} {manifest.description}{outputs}")
+        for alias, output in manifest.aliases.items():
+            print(f"  {alias:<22} alias of {manifest.use_case_id} / {output}")
     return 0
 
 

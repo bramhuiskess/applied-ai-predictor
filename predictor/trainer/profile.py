@@ -43,7 +43,40 @@ class PreparedData:
     groups: pd.Series | None = None  # test_group column, for holding out whole groups
 
 
-def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedData:
+SharedFeatures = tuple[list[FeatureSpec], list[str]]  # (feature specs, notes about dropped columns)
+
+
+def shared_features(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> SharedFeatures:
+    """The inputs of a use case with several outputs, profiled ONCE on all rows.
+
+    Every output drops its own rows without a value, so profiling per output could give one output other
+    category codes, kinds or ranges than the schema that is published; with this every output encodes the same way.
+    """
+    outputs = list(cfg.output_configs())
+    no_target = cfg.model_copy(update={
+        "target": None, "outputs": {}, "task": "anomaly", "baseline": None, "target_min": None, "target_max": None,
+        "horizon_steps": None, "evaluation_label": None, "drop_columns": [*cfg.drop_columns, *outputs]})
+    data = prepare(df, no_target, policy)
+    return data.features, [n for n in data.notes if n.startswith("dropped column")]
+
+
+def _encode(df: pd.DataFrame, specs: list[FeatureSpec]) -> pd.DataFrame:
+    """Apply already profiled feature specs to a table (same codes for categories as the specs say)."""
+    columns: dict[str, pd.Series] = {}
+    for spec in specs:
+        if spec.name not in df.columns:
+            raise TrainingError(f"input {spec.name!r} is missing from the data of this output")
+        col = df[spec.name]
+        if spec.kind == "categorical":
+            codes = {c: i for i, c in enumerate(spec.categories or [])}
+            columns[spec.name] = col.map(lambda v: codes.get(str(v), np.nan) if pd.notna(v) else np.nan).astype(float)
+        else:
+            columns[spec.name] = col.astype(float)
+    return pd.DataFrame(columns)
+
+
+def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy, shared: SharedFeatures | None = None) -> PreparedData:
+    """Turn a table into model-ready data. With ``shared`` (several outputs) the inputs are not profiled again."""
     notes: list[str] = []
     df = df.rename(columns=cfg.rename_columns).copy()
 
@@ -125,7 +158,11 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         # Only used to split; never an input, or the model would just learn each group.
         groups = df.pop(group_column).astype(str).reset_index(drop=True)
 
-    specs, X = _profile_features(df, notes)
+    if shared is None:
+        specs, X = _profile_features(df, notes)
+    else:
+        specs, X = list(shared[0]), _encode(df, shared[0])
+        notes.extend(shared[1])
     if not specs:
         raise TrainingError("no usable feature columns left after profiling")
 

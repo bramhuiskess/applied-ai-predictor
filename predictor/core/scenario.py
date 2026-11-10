@@ -37,9 +37,24 @@ def check_scenario(use_case_id: str, scenario: ScenarioConfig | None, feature_sc
                                 "which is not a numeric input of the trained model")
 
 
+def descriptor_of(descriptors: dict[str, Any], output: str) -> dict[str, Any]:
+    """The descriptor of one output. ``descriptors`` is one descriptor (single output: it applies to the output)
+    or a mapping target name -> descriptor (several outputs)."""
+    return descriptors if "task_type" in descriptors else descriptors.get(output, {})
+
+
+def output_names(descriptors: dict[str, Any]) -> list[str]:
+    if "task_type" in descriptors:
+        return [descriptors["target_name"]] if descriptors.get("target_name") else []
+    return list(descriptors)
+
+
 def describe_scenario(scenario: ScenarioConfig | None, feature_schema: dict[str, Any],
                       descriptor: dict[str, Any]) -> dict[str, Any] | None:
-    """The scenario section of GET /models/{id}: levers with the range the model has seen."""
+    """The scenario section of GET /models/{id}: levers with the range the model has seen.
+
+    ``descriptor``: one descriptor, or a mapping target name -> descriptor for use cases with several outputs.
+    """
     if scenario is None:
         return None
     properties = feature_schema["properties"]
@@ -61,16 +76,18 @@ def describe_scenario(scenario: ScenarioConfig | None, feature_schema: dict[str,
             "beyond_training_data": bool(seen) and (lever.min < seen[0] or lever.max > seen[1]),
         })
     outputs = []
-    for name in [descriptor.get("target_name")] if descriptor.get("target_name") else []:
+    for name in output_names(descriptor):
         config = scenario.outputs.get(name)
+        one = descriptor_of(descriptor, name)
         outputs.append({"name": name, "label": (config.label if config and config.label else name),
-                        "unit": descriptor.get("target_unit"),
+                        "unit": one.get("target_unit"),
                         "value_eur": config.value_eur if config else None,
                         "price_from": config.price_from if config else None,
                         "is_cost": config.is_cost if config else False,
-                        "margin": margin_of_error(descriptor)})
-    return {"levers": levers, "outputs": outputs,
-            "constraints": descriptor.get("scenario_constraints")}
+                        "margin": margin_of_error(one),
+                        "constraints": one.get("scenario_constraints")})
+    first = descriptor_of(descriptor, outputs[0]["name"]) if outputs else descriptor
+    return {"levers": levers, "outputs": outputs, "constraints": first.get("scenario_constraints")}
 
 
 # --------------------------------------------------------------------------- scenario input (ticket 3)
@@ -234,7 +251,7 @@ def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict
         item["eur"] = _round_eur(eur) if eur is not None else None
         if eur is not None:
             money.append(eur)
-        margin = margin_of_error(descriptor)
+        margin = margin_of_error(descriptor_of(descriptor, name))
         item["margin"] = margin
         item["exceeds_margin"] = None if margin is None else abs(change) >= margin
         result[name] = item
@@ -248,7 +265,7 @@ def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, c
     for output, item in comparison["outputs"].items():
         config = scenario.outputs.get(output)
         label = (config.label if config and config.label else output).lower()
-        unit = descriptor.get("target_unit") or ""
+        unit = descriptor_of(descriptor, output).get("target_unit") or ""
         if "positive_class" in item:  # a yes/no or category output
             parts.append(f"the chance of {label} = {item['positive_class']} goes from "
                          f"{item['base_probability']:.0%} to {item['scenario_probability']:.0%}")

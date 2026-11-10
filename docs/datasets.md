@@ -75,7 +75,9 @@ That is the first thing to adjust after the meeting on 12 November (see the ques
 
 ## 2. Results: does a model learn the true cause and effect?
 
-Trained with the normal pipeline (`nursery-harvest-weeks`, `nursery-plants-sold`, `nursery-gas`),
+Trained with the normal pipeline (the `nursery` use case: one manifest, one training run, one model per output;
+here `weeks_to_harvest`, `plants_sold` and `gas_m3`. The old ids `nursery-harvest-weeks`, `nursery-plants-sold`,
+`nursery-gas` and `nursery-electricity` still work as aliases of those outputs),
 then compared with the answer key on test batches the models never saw (Aug 2023-2025):
 
 ![Model vs. answer key](img/scenario_answer_key.png)

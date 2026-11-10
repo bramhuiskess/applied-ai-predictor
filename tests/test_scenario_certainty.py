@@ -149,7 +149,7 @@ def test_higher_certainty_means_a_smaller_error_in_the_effect(tmp_path):
     daily = knmi.synthetic_daily("2015-06-01", "2025-12-31", seed=7)
     df, sim, batches = make_nursery.generate(daily, compartments=10, seed=13)
     write_nursery_tables(tmp_path, df, daily, sim)
-    manifest = json.loads((ROOT / "usecases" / "nursery-harvest-weeks" / "manifest.json").read_text())
+    manifest = json.loads((ROOT / "usecases" / "nursery" / "manifest.json").read_text())
     repoint_nursery(manifest, tmp_path)
     train_use_case(write(tmp_path, manifest), bootstrap.build_registry(tmp_path / "models"))
     client = TestClient(bootstrap.build_app(tmp_path / "usecases", tmp_path / "models"))

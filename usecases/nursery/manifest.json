@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.0",
-  "use_case_id": "nursery-gas",
-  "description": "Gas used to heat a batch (synthetic nursery with a known cause-and-effect model, real KNMI weather 2016-2025).",
+  "use_case_id": "nursery",
+  "description": "A potted-plant batch: weeks to harvest, plants sold, gas for heating and lamp electricity (synthetic nursery with a known cause-and-effect model, real KNMI weather 2016-2025).",
   "data_source": {
     "adapter": "csv-file",
     "path": "data/nursery_base.csv"
@@ -66,17 +66,31 @@
     }
   ],
   "training": {
-    "target": "gas_m3",
-    "task": "regression",
     "time_column": "start_date",
-    "target_min": 0,
     "drop_columns": [
       "batch_id",
-      "compartment",
-      "weeks_to_harvest",
-      "plants_sold",
-      "electricity_kwh"
+      "compartment"
     ],
+    "outputs": {
+      "weeks_to_harvest": {
+        "unit": "weeks",
+        "target_min": 0,
+        "algorithms": ["blend", "lightgbm"]
+      },
+      "plants_sold": {
+        "unit": "plants",
+        "target_min": 0,
+        "algorithms": ["lightgbm"]
+      },
+      "gas_m3": {
+        "unit": "m³",
+        "target_min": 0
+      },
+      "electricity_kwh": {
+        "unit": "kWh",
+        "target_min": 0
+      }
+    },
     "units": {
       "temp_setpoint_c": "°C",
       "light_hours": "h/day",
@@ -87,8 +101,7 @@
       "u_value": "W/m²K",
       "gas_price_eur_m3": "€/m³",
       "outside_temp_avg_c": "°C",
-      "radiation_avg_j_cm2": "J/cm²/day",
-      "gas_m3": "m³"
+      "radiation_avg_j_cm2": "J/cm²/day"
     }
   },
   "model": {
@@ -116,7 +129,9 @@
         "max": 18,
         "step": 0.5,
         "effects": {
-          "gas_m3": "decreasing"
+          "gas_m3": "decreasing",
+          "weeks_to_harvest": "decreasing",
+          "electricity_kwh": "increasing"
         }
       },
       "co2_ppm": {
@@ -126,7 +141,8 @@
         "max": 1100,
         "step": 50,
         "effects": {
-          "gas_m3": "decreasing"
+          "gas_m3": "decreasing",
+          "weeks_to_harvest": "decreasing"
         }
       },
       "ec_ms_cm": {
@@ -143,17 +159,36 @@
         "max": 64,
         "step": 1,
         "effects": {
-          "gas_m3": "decreasing"
+          "gas_m3": "decreasing",
+          "weeks_to_harvest": "decreasing",
+          "plants_sold": "increasing"
         }
       }
     },
     "outputs": {
+      "weeks_to_harvest": {
+        "label": "Weeks to harvest"
+      },
+      "plants_sold": {
+        "label": "Plants sold",
+        "value_eur": 2.1
+      },
       "gas_m3": {
         "label": "Gas use",
         "price_from": "gas_price_eur_m3",
         "is_cost": true
+      },
+      "electricity_kwh": {
+        "label": "Lamp electricity",
+        "value_eur": -0.12
       }
     },
     "case_label": "batches"
+  },
+  "aliases": {
+    "nursery-gas": "gas_m3",
+    "nursery-harvest-weeks": "weeks_to_harvest",
+    "nursery-plants-sold": "plants_sold",
+    "nursery-electricity": "electricity_kwh"
   }
 }

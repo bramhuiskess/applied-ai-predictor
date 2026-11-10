@@ -36,16 +36,43 @@ class ModelRunner(Protocol):
 
 
 @dataclass
-class LoadedModel:
+class OutputModel:
+    """The trained model of one output of a use case."""
+
+    name: str
     descriptor: dict[str, Any]
-    feature_schema: dict[str, Any]
     runner: ModelRunner
+
+
+@dataclass
+class LoadedModel:
+    """One published version: a model per output, sharing the inputs (schema), joins and support."""
+
+    outputs: dict[str, OutputModel]
+    feature_schema: dict[str, Any]
     support: dict[str, Any] | None = None  # map of the training data, for "comparable cases"
     joins: JoinEngine | None = None  # lookup tables the model was trained with, to fill joined inputs
 
     @property
+    def primary(self) -> OutputModel:
+        """The first output: what single-output code (and the flat API shape) means."""
+        return next(iter(self.outputs.values()))
+
+    @property
+    def descriptor(self) -> dict[str, Any]:
+        return self.primary.descriptor
+
+    @property
+    def runner(self) -> ModelRunner:
+        return self.primary.runner
+
+    @property
     def version(self) -> str:
         return str(self.descriptor["model_version"])
+
+    def only(self, output: str) -> LoadedModel:
+        """The same version seen as a single-output model (used for the aliases of an output)."""
+        return LoadedModel({output: self.outputs[output]}, self.feature_schema, self.support, self.joins)
 
 
 class ModelRegistry(Protocol):
