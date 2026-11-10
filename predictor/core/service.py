@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
+from predictor.core.certainty import SupportIndex, certainty
 from predictor.core.manifest import Manifest
 from predictor.core.monitoring import Monitor
 from predictor.core.policy import check_record, check_schema
@@ -49,6 +50,7 @@ class UseCase:
     manifest: Manifest
     model: LoadedModel | None
     validator: FeatureValidator | None
+    support: SupportIndex | None = None
 
     @property
     def status(self) -> str:
@@ -89,7 +91,8 @@ class PredictionService:
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
-            use_cases.append(UseCase(manifest, model, validator))
+            support = SupportIndex(model.support) if model and model.support and manifest.scenario else None
+            use_cases.append(UseCase(manifest, model, validator, support))
         return cls(use_cases, monitor)
 
     # ------------------------------------------------------------------ queries
@@ -176,25 +179,34 @@ class PredictionService:
         resolved = self._resolve(uc, base.get("features"), scenarios)
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0,
                       warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
         return {
             **self._header(uc),
             "base": {"record_id": base.get("record_id"), "features": resolved.base,
-                     "warnings": resolved.base_warnings, "outputs": outputs[0]},
+                     "warnings": resolved.base_warnings, "outputs": outputs[0], "certainty": sure[0]},
             "scenarios": [self._scenario_result(uc, s.name, s.changes, s.features, s.warnings,
-                                                resolved.base, outputs[0], out)
-                          for s, out in zip(resolved.scenarios, outputs[1:])],
+                                                resolved.base, outputs[0], out, c)
+                          for s, out, c in zip(resolved.scenarios, outputs[1:], sure[1:])],
         }
 
     @staticmethod
     def _scenario_result(uc: UseCase, name: str, changes: list, features: dict, warnings: list,
-                         base_row: dict, base_out: dict, out: dict) -> dict[str, Any]:
+                         base_row: dict, base_out: dict, out: dict, sure: dict | None) -> dict[str, Any]:
         cfg, descriptor = uc.manifest.scenario, uc.model.descriptor
         comparison = compare(cfg, descriptor, base_row, base_out, features, out)
         return {"name": name, "changes": changes, "features": features, "warnings": warnings, "outputs": out,
-                "difference": comparison["outputs"], "net_eur": comparison["net_eur"],
-                "summary": summarise(cfg, descriptor, name, comparison)}
+                "difference": comparison["outputs"], "net_eur": comparison["net_eur"], "certainty": sure,
+                "summary": summarise(cfg, descriptor, name, comparison, sure)}
+
+    @staticmethod
+    def _certainty(uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
+        """How many comparable training cases each row has (None when not available)."""
+        if uc.support is None:
+            return [None] * len(rows)
+        counts = uc.support.comparable(uc.validator.to_matrix(rows))
+        return [certainty(c, uc.manifest.scenario.case_label) for c in counts]
 
     def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
               stop: float | None = None, step: float | None = None) -> dict[str, Any]:
@@ -208,6 +220,7 @@ class PredictionService:
         resolved = self._resolve(uc, base.get("features"), requested)
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
                                                        uc.model.descriptor)["levers"] if l["name"] == lever)
@@ -216,12 +229,13 @@ class PredictionService:
             **self._header(uc),
             "lever": lever_info,
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
-                     "value": resolved.base[lever], "outputs": outputs[0]},
+                     "value": resolved.base[lever], "outputs": outputs[0], "certainty": sure[0]},
             "points": [{"value": v, "outputs": out,
                         "difference": compare(uc.manifest.scenario, uc.model.descriptor, resolved.base, outputs[0],
                                               s.features, out)["outputs"],
-                        "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1]}
-                       for v, s, out in zip(values, resolved.scenarios, outputs[1:])],
+                        "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1],
+                        "certainty": c}
+                       for v, s, out, c in zip(values, resolved.scenarios, outputs[1:], sure[1:])],
         }
 
     def _scenario_use_case(self, use_case_id: str) -> UseCase:

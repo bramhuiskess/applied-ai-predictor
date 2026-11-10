@@ -1,0 +1,93 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "nursery-electricity",
+  "description": "Lamp electricity per batch (synthetic nursery with a known cause-and-effect model, real KNMI weather 2016-2025). Together with nursery-gas this shows both sides of a lamp scenario: more power, less gas. The euro value assumes 0.12 EUR/kWh for growers; change value_eur when the real tariff is known.",
+  "data_source": {
+    "adapter": "csv-file",
+    "path": "data/nursery.csv"
+  },
+  "training": {
+    "target": "electricity_kwh",
+    "task": "regression",
+    "time_column": "start_date",
+    "target_min": 0,
+    "drop_columns": [
+      "batch_id",
+      "compartment",
+      "weeks_to_harvest",
+      "plants_sold",
+      "gas_m3",
+      "gas_price_eur_m3"
+    ],
+    "units": {
+      "temp_setpoint_c": "°C",
+      "light_hours": "h/day",
+      "co2_ppm": "ppm",
+      "ec_ms_cm": "mS/cm",
+      "plant_density_m2": "plants/m²",
+      "area_m2": "m²",
+      "u_value": "W/m²K",
+      "outside_temp_avg_c": "°C",
+      "radiation_avg_j_cm2": "J/cm²/day",
+      "electricity_kwh": "kWh"
+    }
+  },
+  "model": {
+    "runner": "onnx",
+    "version": "latest"
+  },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  },
+  "scenario": {
+    "levers": {
+      "temp_setpoint_c": {
+        "label": "Greenhouse temperature",
+        "unit": "°C",
+        "min": 17,
+        "max": 23,
+        "step": 0.5
+      },
+      "light_hours": {
+        "label": "Lamp hours",
+        "unit": "h/day",
+        "min": 0,
+        "max": 18,
+        "step": 0.5,
+        "effects": {
+          "electricity_kwh": "increasing"
+        }
+      },
+      "co2_ppm": {
+        "label": "CO₂ level",
+        "unit": "ppm",
+        "min": 400,
+        "max": 1100,
+        "step": 50
+      },
+      "ec_ms_cm": {
+        "label": "Fertiliser (EC)",
+        "unit": "mS/cm",
+        "min": 1.2,
+        "max": 2.8,
+        "step": 0.1
+      },
+      "plant_density_m2": {
+        "label": "Plant density",
+        "unit": "plants/m²",
+        "min": 32,
+        "max": 64,
+        "step": 1
+      }
+    },
+    "outputs": {
+      "electricity_kwh": {
+        "label": "Lamp electricity",
+        "value_eur": -0.12
+      }
+    },
+    "case_label": "batches"
+  }
+}

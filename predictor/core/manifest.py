@@ -38,6 +38,13 @@ class Baseline(_Strict):
     label: str
 
 
+class TestGroup(_Strict):
+    """Hold out whole groups (a farm, a greenhouse) as the test set: can the model handle one it never saw?"""
+
+    column: str
+    values: list[str] = Field(min_length=1)
+
+
 class TrainingConfig(_Strict):
     target: str | None = None
     task: Literal["auto", "regression", "classification", "anomaly"] = "auto"
@@ -46,6 +53,7 @@ class TrainingConfig(_Strict):
     # Backtest: everything from this date on is the test set (e.g. train up to 2020, test 2021-2025).
     test_from: date | None = None
     baseline: Baseline | None = None
+    test_group: TestGroup | None = None
     # Physical limits of the target (gas use cannot be negative). Predictions are kept within them.
     target_min: float | None = None
     target_max: float | None = None
@@ -70,6 +78,8 @@ class TrainingConfig(_Strict):
             raise ValueError("'target_min'/'target_max' only apply to regression")
         if self.target_min is not None and self.target_max is not None and self.target_min >= self.target_max:
             raise ValueError("'target_min' must be smaller than 'target_max'")
+        if self.test_group and self.test_from:
+            raise ValueError("use either 'test_from' or 'test_group' to choose the test set, not both")
         if self.test_from and not self.time_column:
             raise ValueError("'test_from' needs a 'time_column' to know which records come after it")
         return self
@@ -161,6 +171,9 @@ class ScenarioOutput(_Strict):
 class ScenarioConfig(_Strict):
     levers: dict[str, Lever] = Field(min_length=1)
     outputs: dict[str, ScenarioOutput] = {}
+    # What one row is, in the user's words ("batches", "fields"), for messages like
+    # "based on 14 comparable batches in the history".
+    case_label: str = Field(default="cases", min_length=1, max_length=40)
 
 
 class Manifest(_Strict):

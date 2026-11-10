@@ -7,3 +7,4 @@ models
 .github
 docs
 notebooks
+data/raw

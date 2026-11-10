@@ -4,11 +4,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm 
 WORKDIR /app
 COPY pyproject.toml ./
 COPY predictor ./predictor
-RUN pip install --no-cache-dir ".[train]"
+RUN pip install --no-cache-dir ".[train,datasets]"
 COPY scripts ./scripts
 COPY usecases ./usecases
 COPY data ./data
+# Real greenhouse data (8 MB download); a local copy of the result is reused.
 RUN python scripts/make_datasets.py && python scripts/make_nursery.py && python scripts/make_arable.py \
+    && ([ -f data/greenhouse_days.csv ] || python scripts/make_greenhouse_challenge.py) \
     && predictor train
 
 # Stage 2: the serving image. No pandas, scikit-learn or LightGBM: the core only

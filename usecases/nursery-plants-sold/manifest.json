@@ -87,6 +87,7 @@
         "label": "Plants sold",
         "value_eur": 2.1
       }
-    }
+    },
+    "case_label": "batches"
   }
 }

@@ -94,6 +94,7 @@
         "price_from": "gas_price_eur_m3",
         "is_cost": true
       }
-    }
+    },
+    "case_label": "batches"
   }
 }
