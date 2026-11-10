@@ -93,7 +93,7 @@ def test_invalid_scenario_sections_fail_fast(tmp_path, m, message):
 
 def test_valid_scenario_section_loads(tmp_path):
     loaded = load_manifest(write(tmp_path, manifest("data.csv")))
-    assert loaded.training.outputs == ["gas"]
+    assert loaded.training.output_names == ["gas"]
     assert loaded.scenario.levers["lamps"].effects == {"gas": "decreasing"}
     assert loaded.scenario.outputs["gas"].value_eur == -0.45
 

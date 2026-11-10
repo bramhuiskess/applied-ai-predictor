@@ -30,6 +30,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from predictor.trainer.errors import TrainingError
+
 SEED = 42
 
 PRIMARY_METRIC = {"regression": ("mae", "lower"), "classification": ("f1", "higher"), "anomaly": (None, None)}
@@ -114,9 +116,23 @@ def pinned_effects(model: Pipeline, names: list[str], monotone: list[int] | None
     return [name for name, d, c in zip(names, monotone, est.coef_) if d and abs(c) < 1e-9]
 
 
-def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | None = None) -> dict[str, Pipeline]:
-    """`monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint and,
+def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | None = None,
+               allowed: list[str] | None = None) -> dict[str, Pipeline]:
+    """The models that may compete for a task; `allowed` (from the manifest) keeps only those names.
+
+    `monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint and,
     for regression, a sign constraint on the linear model's coefficients."""
+    everything = _all_candidates(task, anomaly_share, monotone)
+    if allowed is None:
+        return everything
+    unknown = [name for name in allowed if name not in everything]
+    if unknown:
+        raise TrainingError(f"model(s) {unknown} are not available for a '{task}' output "
+                            f"(available: {', '.join(everything)}); fix 'algorithms' in the manifest")
+    return {name: model for name, model in everything.items() if name in allowed}
+
+
+def _all_candidates(task: str, anomaly_share: float, monotone: list[int] | None) -> dict[str, Pipeline]:
     impute = ("impute", SimpleImputer(strategy="median", keep_empty_features=True))
     lgbm = dict(n_estimators=400, learning_rate=0.05, num_leaves=31, random_state=SEED, verbose=-1)
     if monotone and any(monotone):

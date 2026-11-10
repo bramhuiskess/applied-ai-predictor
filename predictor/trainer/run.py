@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -14,23 +15,40 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 
-from predictor.adapters.fs_registry import FilesystemRegistry
+from predictor.adapters.fs_registry import FilesystemRegistry, PublishedOutput
 from predictor.adapters.sources import adapter_for, read_table
 from predictor.core.certainty import build_support
-from predictor.core.manifest import MANIFEST_FILENAME, Manifest, load_manifest
+from predictor.core.manifest import ALGORITHMS, MANIFEST_FILENAME, Manifest, TrainingConfig, load_manifest
 from predictor.trainer import models
 from predictor.trainer.export import check_parity, make_thresholds_float32_safe, to_onnx
 from predictor.trainer.errors import TrainingError
 from predictor.trainer.join import apply_joins
-from predictor.trainer.profile import build_feature_schema, detect_task, prepare
+from predictor.trainer.profile import SharedFeatures, build_feature_schema, detect_task, prepare, shared_features
 
-ARTIFACT_NAME = "model.onnx"
 EVALUATION_SAMPLES = 500
 
 
-def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path: Path | None = None) -> dict[str, Any]:
-    manifest = load_manifest(manifest_path)
-    cfg = manifest.training
+@dataclass
+class _Table:
+    """The base table with its joins applied, read once per training run."""
+
+    df: pd.DataFrame
+    source: Path
+    base_rows: int
+    joined: Any  # trainer.join.AppliedJoins | None
+
+
+@dataclass
+class _Trained:
+    """One trained model plus what has to be published with it."""
+
+    descriptor: dict[str, Any]
+    schema: dict[str, Any]
+    artifact: bytes
+    support_file: dict[str, str]
+
+
+def _load_table(manifest: Manifest, data_path: Path | None) -> _Table:
     source = data_path or manifest.data_source.path
     if not source:
         raise TrainingError(f"{manifest.use_case_id}: no dataset given (use --data or data_source.path)")
@@ -39,22 +57,25 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         raise TrainingError(f"{manifest.use_case_id}: dataset {source} not found")
     adapter = manifest.data_source.adapter if data_path is None else adapter_for(source)
     df = read_table(adapter, source)
-
     # Joins run first, on the raw base columns (before rename_columns): lookup tables become ordinary columns.
     base_rows = len(df)
-    joined = None
-    if manifest.joins:
-        joined = apply_joins(manifest, df)
-        df = joined.df
-        if joined.consumed:  # dates that only place a window are join inputs, not model features
-            cfg = cfg.model_copy(update={"drop_columns": [*cfg.drop_columns, *joined.consumed]})
+    joined = apply_joins(manifest, df) if manifest.joins else None
+    return _Table(joined.df if joined else df, source, base_rows, joined)
 
-    data = prepare(df, cfg, manifest.policy)
+
+def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowed: list[str] | None = None,
+                  shared: SharedFeatures | None = None) -> _Trained:
+    """Train, choose and export the model for the single target of ``cfg`` (profile, split, candidates, ONNX)."""
+    df, source, base_rows, joined = table.df, table.source, table.base_rows, table.joined
+    if joined and joined.consumed:  # dates that only place a window are join inputs, not model features
+        cfg = cfg.model_copy(update={"drop_columns": [*cfg.drop_columns, *joined.consumed]})
+
+    data = prepare(df, cfg, manifest.policy, shared)
     if joined:
         data.notes[:0] = joined.notes
     task = data.task
     feature_names = [f.name for f in data.features]
-    monotone = _scenario_constraints(manifest, data)
+    monotone = _scenario_constraints(manifest, data, cfg.target)
     bounds = ((cfg.target_min, cfg.target_max)
               if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None) else None)
     test_start = None
@@ -93,7 +114,7 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
     excluded: dict[str, list[str]] = {}
-    for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone).items():
+    for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone, allowed).items():
         if fit_groups is not None:
             val_metrics = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds)
         else:
@@ -143,6 +164,7 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     schema = build_feature_schema(manifest.use_case_id, data.features, X_train, cfg.units)
     descriptor: dict[str, Any] = {
         "use_case_id": manifest.use_case_id,
+        "output": cfg.target or "anomaly",
         "task_type": task,
         "algorithm": best_name,
         "runner": "onnx",
@@ -184,7 +206,7 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
         if manifest.policy.evaluation_rows_allowed:
             support = build_support(X_fit.to_numpy(dtype="float64"), [f.kind for f in data.features], feature_names,
                                     [f.categories for f in data.features], descriptor["feature_importance"])
-            support_file["support.json"] = json.dumps(support)
+            support_file["support.json"] = json.dumps(support)  # stored in this output's own folder
             descriptor["certainty"] = {"available": True, "training_rows": support["rows"],
                                        "radius": round(support["radius"], 6)}
         else:
@@ -196,19 +218,90 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     descriptor["parity"] = parity
     if not parity["passed"]:
         raise TrainingError(f"ONNX export does not match the original model: {parity}")
+    return _Trained(descriptor, schema, artifact, support_file)
 
+
+def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path: Path | None = None) -> dict[str, Any]:
+    """Train every output of a use case on the same joined data and publish them as one version.
+
+    The result has the flat keys of the first output (what single-output callers expect) plus ``outputs``:
+    name -> descriptor of every output.
+    """
+    manifest = load_manifest(manifest_path)
+    table = _load_table(manifest, data_path)
+    configs = manifest.training.output_configs()
+    allowed = _check_algorithms(manifest, table, configs)  # before anything is trained
+    # With several outputs the inputs are profiled once on all rows, so every output encodes them the same way.
+    shared = _shared_features(manifest, table) if len(configs) > 1 else None
+    trained: dict[str, _Trained] = {}
+    for name in configs or ["anomaly"]:  # without a target the use case is anomaly detection
+        view = manifest.training.for_output(name) if name in configs else manifest.training
+        trained[name] = _train_output(manifest, view, table, allowed.get(name), shared)
+    first_name, first = next(iter(trained.items()))
+    for name, other in trained.items():
+        if _encoding(other.schema) != _encoding(first.schema):
+            raise TrainingError(
+                f"{manifest.use_case_id}: output {name!r} ended up with other inputs than {first_name!r} "
+                f"({sorted(set(_encoding(other.schema).items()) ^ set(_encoding(first.schema).items()))[:4]}); "
+                "all outputs of a use case share one set of inputs, so fix the data or split the use case")
+    joined = table.joined
     version = registry.publish(
         manifest.use_case_id,
-        descriptor=descriptor,
-        feature_schema=schema,
-        artifact_name=ARTIFACT_NAME,
-        artifact=artifact,
-        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2), **support_file,
+        outputs={name: PublishedOutput(t.descriptor, t.artifact, t.support_file) for name, t in trained.items()},
+        feature_schema=first.schema,
+        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2),
                      **(joined.engine.snapshot() if joined and joined.engine else {})},
     )
+    described = {name: {**t.descriptor, "model_version": version} for name, t in trained.items()}
     report_path = registry.root / manifest.use_case_id / version / "report.md"
-    report_path.write_text(render_report(manifest, {**descriptor, "model_version": version}), encoding="utf-8")
-    return {**descriptor, "model_version": version, "report": str(report_path)}
+    report_path.write_text(render_report(manifest, described[first_name], described), encoding="utf-8")
+    return {**described[first_name], "report": str(report_path), "outputs": described}
+
+
+def _encoding(schema: dict[str, Any]) -> dict[str, Any]:
+    """What a model needs to read an input: its name, kind and category order (not the observed range)."""
+    return {name: (prop.get("x-kind"), tuple(prop.get("enum") or ())) for name, prop in schema["properties"].items()}
+
+
+def _shared_features(manifest: Manifest, table: _Table) -> SharedFeatures:
+    cfg = manifest.training
+    if table.joined and table.joined.consumed:  # same dates-that-only-place-a-window rule as for every output
+        cfg = cfg.model_copy(update={"drop_columns": [*cfg.drop_columns, *table.joined.consumed]})
+    return shared_features(table.df, cfg, manifest.policy)
+
+
+def _check_algorithms(manifest: Manifest, table: _Table, configs: dict) -> dict[str, list[str] | None]:
+    """The models allowed per output, checked for the real task of each output before the first one is trained.
+
+    An ``algorithms`` list on an output must all exist for its task; the default (``model.algorithms``) is cut down to
+    the names that exist for the task of that output.
+    """
+    default = manifest.model.algorithms
+    if not configs:  # anomaly detection
+        return {"anomaly": [n for n in default if n in ALGORITHMS["anomaly"]] or None} if default else {}
+    allowed: dict[str, list[str] | None] = {}
+    for name, config in configs.items():
+        task = config.task
+        if task == "auto" and name in table.df.columns:
+            task = detect_task(table.df[name])
+        if task not in ALGORITHMS:  # the column is missing: prepare() reports that
+            allowed[name] = config.algorithms or default
+            continue
+        if config.algorithms:
+            unknown = [n for n in config.algorithms if n not in ALGORITHMS[task]]
+            if unknown:
+                raise TrainingError(f"{manifest.use_case_id}: output {name!r} is a '{task}' output, so the model(s) {unknown} "
+                                    f"are not available for it (available: {', '.join(ALGORITHMS[task])}); fix 'algorithms'")
+            allowed[name] = config.algorithms
+        elif default:
+            fitting = [n for n in default if n in ALGORITHMS[task]]
+            if not fitting:
+                raise TrainingError(f"{manifest.use_case_id}: model.algorithms {default} has no model for output {name!r} "
+                                    f"(a '{task}' output; available: {', '.join(ALGORITHMS[task])}); set 'algorithms' on it")
+            allowed[name] = fitting
+        else:
+            allowed[name] = None
+    return allowed
 
 
 def init_use_case(
@@ -288,12 +381,21 @@ def init_use_case(
     return path, remarks
 
 
-def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
+def render_report(manifest: Manifest, d: dict[str, Any], outputs: dict[str, dict[str, Any]] | None = None) -> str:
+    """The training report. With several ``outputs`` (name -> descriptor) there is one section per output."""
+    lines = [f"# Training report: {manifest.use_case_id} v{d['model_version']}", "", manifest.description, ""]
+    if not outputs or len(outputs) == 1:
+        return "\n".join(lines + _output_report(manifest, d)) + "\n"
+    lines += [f"One training run, {len(outputs)} outputs, each with its own model: " + ", ".join(f"`{n}`" for n in outputs), ""]
+    for i, (name, descriptor) in enumerate(outputs.items()):
+        shown = {**descriptor, "model_version": d["model_version"], **({"joins": []} if i else {})}  # joins: once
+        section = _output_report(manifest, shown)
+        lines += [f"## Output: {name}", ""] + [("#" + line if line.startswith("## ") else line) for line in section]
+    return "\n".join(lines) + "\n"
+
+
+def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
     lines = [
-        f"# Training report: {manifest.use_case_id} v{d['model_version']}",
-        "",
-        manifest.description,
-        "",
         f"- Task: **{d['task_type']}**" + (f", target `{d['target_name']}`" if d.get("target_name") else ""),
         f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on "
         + (f"{d['split']['validation_method']} cross-validation" if d["split"].get("validation_method", "hold-out") != "hold-out"
@@ -325,7 +427,7 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
         lines += ["", "## Feature importance (chosen model)", ""]
         lines += [f"- `{name}`: {share:.1%}" for name, share in list(d["feature_importance"].items())[:10]]
     if manifest.scenario:
-        target = manifest.training.target
+        target = d.get("output") or manifest.training.target
         lines += ["", "## Scenario levers", "", "| lever | range | step | declared effect on " + f"`{target}` |", "|---|---|---|---|"]
         for name, lever in manifest.scenario.levers.items():
             effect = lever.effects.get(target, "none (free)")
@@ -347,7 +449,9 @@ def render_report(manifest: Manifest, d: dict[str, Any]) -> str:
                   f"label agreement: {p['label_agreement']}, passed: **{p['passed']}**"]
     if d.get("notes"):
         lines += ["", "## Notes", ""] + [f"- {n}" for n in d["notes"]]
-    return "\n".join(lines) + "\n"
+    return lines
+
+
 
 
 def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, groups: pd.Series,
@@ -448,7 +552,7 @@ def _typical_input(features, X_train) -> dict[str, Any]:
     return example
 
 
-def _scenario_constraints(manifest: Manifest, data) -> list[int] | None:
+def _scenario_constraints(manifest: Manifest, data, target: str | None) -> list[int] | None:
     """Check the scenario levers against the prepared data and build the monotone constraints."""
     if manifest.scenario is None:
         return None
@@ -459,7 +563,6 @@ def _scenario_constraints(manifest: Manifest, data) -> list[int] | None:
                                 f"(missing, constant or dropped; inputs: {', '.join(kinds)})")
         if kinds[name] == "categorical":
             raise TrainingError(f"scenario lever {name!r} is categorical; only numeric and yes/no inputs can be levers")
-    target = manifest.training.target
     directions = {name: lever.effects[target] for name, lever in manifest.scenario.levers.items()
                   if target in lever.effects}
     if not directions:

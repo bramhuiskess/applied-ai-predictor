@@ -37,9 +37,24 @@ def check_scenario(use_case_id: str, scenario: ScenarioConfig | None, feature_sc
                                 "which is not a numeric input of the trained model")
 
 
+def descriptor_of(descriptors: dict[str, Any], output: str) -> dict[str, Any]:
+    """The descriptor of one output. ``descriptors`` is one descriptor (single output: it applies to the output)
+    or a mapping target name -> descriptor (several outputs)."""
+    return descriptors if "task_type" in descriptors else descriptors.get(output, {})
+
+
+def output_names(descriptors: dict[str, Any]) -> list[str]:
+    if "task_type" in descriptors:
+        return [descriptors["target_name"]] if descriptors.get("target_name") else []
+    return list(descriptors)
+
+
 def describe_scenario(scenario: ScenarioConfig | None, feature_schema: dict[str, Any],
                       descriptor: dict[str, Any]) -> dict[str, Any] | None:
-    """The scenario section of GET /models/{id}: levers with the range the model has seen."""
+    """The scenario section of GET /models/{id}: levers with the range the model has seen.
+
+    ``descriptor``: one descriptor, or a mapping target name -> descriptor for use cases with several outputs.
+    """
     if scenario is None:
         return None
     properties = feature_schema["properties"]
@@ -61,16 +76,18 @@ def describe_scenario(scenario: ScenarioConfig | None, feature_schema: dict[str,
             "beyond_training_data": bool(seen) and (lever.min < seen[0] or lever.max > seen[1]),
         })
     outputs = []
-    for name in [descriptor.get("target_name")] if descriptor.get("target_name") else []:
+    for name in output_names(descriptor):
         config = scenario.outputs.get(name)
+        one = descriptor_of(descriptor, name)
         outputs.append({"name": name, "label": (config.label if config and config.label else name),
-                        "unit": descriptor.get("target_unit"),
+                        "unit": one.get("target_unit"),
                         "value_eur": config.value_eur if config else None,
                         "price_from": config.price_from if config else None,
                         "is_cost": config.is_cost if config else False,
-                        "margin": margin_of_error(descriptor)})
-    return {"levers": levers, "outputs": outputs,
-            "constraints": descriptor.get("scenario_constraints")}
+                        "margin": margin_of_error(one),
+                        "constraints": one.get("scenario_constraints")})
+    first = descriptor_of(descriptor, outputs[0]["name"]) if outputs else descriptor
+    return {"levers": levers, "outputs": outputs, "constraints": first.get("scenario_constraints")}
 
 
 # --------------------------------------------------------------------------- scenario input (ticket 3)
@@ -234,7 +251,7 @@ def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict
         item["eur"] = _round_eur(eur) if eur is not None else None
         if eur is not None:
             money.append(eur)
-        margin = margin_of_error(descriptor)
+        margin = margin_of_error(descriptor_of(descriptor, name))
         item["margin"] = margin
         item["exceeds_margin"] = None if margin is None else abs(change) >= margin
         result[name] = item
@@ -243,12 +260,19 @@ def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict
 
 def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, comparison: dict[str, Any],
               certainty: dict[str, Any] | None = None) -> str:
-    """One plain sentence per scenario, for people who do not read JSON."""
+    """One plain sentence per scenario, for people who do not read JSON.
+
+    When several outputs change by less than the model's typical error, that is said once at the end ("no clear
+    effect: gas use (±3,028 m³), plants sold (±3,894 plants)") instead of after every output.
+    """
     parts = []
+    unclear = [o for o, i in comparison["outputs"].items() if i.get("exceeds_margin") is False and i.get("change")]
+    grouped = len(unclear) > 1
+    quiet: list[str] = []
     for output, item in comparison["outputs"].items():
         config = scenario.outputs.get(output)
         label = (config.label if config and config.label else output).lower()
-        unit = descriptor.get("target_unit") or ""
+        unit = descriptor_of(descriptor, output).get("target_unit") or ""
         if "positive_class" in item:  # a yes/no or category output
             parts.append(f"the chance of {label} = {item['positive_class']} goes from "
                          f"{item['base_probability']:.0%} to {item['scenario_probability']:.0%}")
@@ -264,13 +288,18 @@ def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, c
             detail += f", worth {_eur_text(item['eur'])}"
         sentence = f"{size} ({detail})"
         if item["exceeds_margin"] is False:
-            sentence += (f"; this is within the model's typical error of ±{item['margin']:,.{_decimals(item['margin'])}f} "
-                         f"{unit}, so treat it as no clear effect").rstrip()
+            margin = f"±{item['margin']:,.{_decimals(item['margin'])}f} {unit}".strip()
+            if grouped:
+                quiet.append(f"{label} ({margin})")
+            else:
+                sentence += f"; this is within the model's typical error of {margin}, so treat it as no clear effect"
         parts.append(sentence)
     text = f"{name}: " + "; ".join(parts)
     if comparison["net_eur"] is not None and len(comparison["outputs"]) > 1:
         text += f". Net worth {_eur_text(comparison['net_eur'])}"
     text += "."
+    if quiet:
+        text += f" Within the model's typical error, so no clear effect: {', '.join(quiet)}."
     if certainty:
         text += " " + certainty["message"]
     return text
