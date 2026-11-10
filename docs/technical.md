@@ -48,7 +48,7 @@ python scripts/make_nursery.py && python scripts/make_arable.py   # scenario dat
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 198 tests, ~40 s, fully offline
+pytest                            # 321 tests, ~95 s, fully offline
 ```
 
 ### Technical notebook
@@ -88,9 +88,88 @@ columns that look like personal data. `train` then:
    it also warns about probable **target leakage** (a feature that on its own determines the target,
    such as AI4I's failure-mode columns, which `init` cannot know are derived from the target);
 7. publishes a new version in `models/<use_case>/<version>/` with `descriptor.json`,
-   `feature_schema.json`, `model.onnx` and a human-readable `report.md`.
+   `feature_schema.json`, `model.onnx` and a human-readable `report.md` (and, with joins, `joins.json` and
+   `lookups/`).
+
+With `joins` in the manifest, step 0 connects the lookup tables to the base table and checks the keys, see
+[Joining datasets](#joining-datasets).
 
 Retraining creates version 2, 3, and so on. A manifest can pin `"model": {"version": "2"}`.
+
+## Joining datasets
+
+A use case can have one base table (`data_source`, one row per thing you predict) and any number of lookup
+tables that are connected to it **in the manifest**. This replaces joining in a data script: the manifest
+says where each column comes from, and the running service can fill those columns itself.
+
+```jsonc
+"data_source": { "adapter": "csv-file", "path": "data/nursery_base.csv" },
+"joins": [
+  { "name": "compartment",                      // key join: static attributes per key
+    "source": { "adapter": "csv-file", "path": "data/compartments.csv" },
+    "keys": { "compartment": "compartment" },     // base column -> lookup column
+    "aggregate": { "area_m2": { "column": "area_m2", "op": "first" },
+                   "lamp_type": { "column": "lamp_type", "op": "first" } } },
+  { "name": "weather",                          // time join: aggregate a window after a date
+    "source": { "adapter": "csv-file", "path": "data/weather_rotterdam.csv" },
+    "time": { "base": "start_date", "lookup": "date" },
+    "window": { "start": { "offset": 0 }, "end": { "offset": 10, "unit": "weeks" } },   // half-open [start, end)
+    "aggregate": { "outside_temp_avg_c": { "column": "temp_mean_c", "op": "mean", "round": 2 } },
+    "fallback": "climatology" }                 // serving only, see below
+]
+```
+
+- **`keys`** connect by equality (a number and its text form match: `344` = `"344"`). A key-only join needs one lookup
+  row per key (op `first`). **`time`** + **`window`** aggregate the lookup rows of the same key (if any) between two dates.
+  Use both for "the weather of this province during the growing season".
+- **Window edges** are a date plus an offset in `days` or `weeks`. They start from `time.base`, or from any base column:
+  `"start": {"column": "season_start"}, "end": {"column": "season_end", "offset": 1}` (an inclusive end date).
+  Nothing in the window is tied to the generator that made the data (it need not start on a Monday).
+- **`aggregate`** maps each *new* column to a lookup column and an op: `mean sum min max count first last`, with an
+  optional `scale` and `round`. Empty values are skipped, but a day only counts as covered when its value is there:
+  a window needs `min_coverage` (default 90%) of its days.
+- Joins run **before** `rename_columns`, on the raw base column names. Dates that only place a window are not model
+  features (they are dropped automatically); key columns stay features unless listed in `drop_columns`.
+- Rules checked at startup: unique join names, no new column that is the target, time column, a dropped column or a
+  forbidden field, no window that ends before it starts, no join input or new column in `rename_columns` (joins run before
+  renaming, the service uses the renamed names), no `horizon_steps` (rows without a match are dropped, which would shift
+  the forecast), and **a joined column cannot be a scenario lever** (it is derived, not chosen). Training also refuses a
+  new column that already exists in the base table (it would silently replace it).
+- Dates must look like `YYYY-MM-DD` (a time part is ignored) and lie in 1900-2200: numbers such as `20240304`, bare years
+  and lists are errors, not guesses. A join may be keyed on a column an earlier join created (joins run in order).
+
+### The key check
+
+`predictor train` checks every join first, and `predictor check-joins [use-case ...]` does the same without training.
+It fails with a readable message on: missing columns, dates that do not parse, duplicate lookup keys or `(key, date)` rows
+(they would multiply rows), and keys that do not match (below `min_match`, default 95% of the rows). Typos come with a
+suggestion (`'Friesland' is not in the lookup; did you mean 'Fryslân'?`, or *differs only in case, accents or spaces*).
+It warns about windows that are only partly or not at all in the lookup, gaps inside windows, and new columns that are
+constant. `predictor check-joins --suggest base.csv lookup.csv` proposes key and date columns when you write a new join.
+
+### At prediction time
+
+The join runs in the same code (`predictor/core/joins.py`, numpy only) when the model is trained and when it is used.
+At training the lookup tables are read, joined, and **a snapshot is stored with the model version**
+(`joins.json`, `lookups/<name>.npz`), so the service needs no data files and an old version keeps behaving the same.
+A caller can then send the *join inputs* instead of the joined columns:
+
+```jsonc
+{"features": {"compartment": "K07", "start_date": "2026-10-26", "temp_setpoint_c": 19, "light_hours": 7.5, ...}}
+```
+
+- Columns the caller sends win over the lookup (also for "what if the winter is 5 degrees colder"). Join inputs that are
+  not model features are removed before the schema check, so `reject_unknown_fields` still holds, and the policy sees the
+  request before anything is filled in.
+- A window that is not (fully) in the lookup, e.g. a start date next year, is an error unless the join says
+  `"fallback": "climatology"`: then the same calendar window is averaged over every year of the lookup in which it is fully
+  present, and the response carries a warning (*"outside_temp_avg_c are not observed for ...; filled with the average of the
+  same period in 10 other year(s)"*). Training never uses the fallback.
+- Scenarios fill the base once; every scenario starts from that row, so a lever is never overwritten by a join.
+- `GET /models/{id}` shows per input `derived_by`/`required: false`, and a `joins` list with what each join `accepts`.
+
+Not yet: conditional counts (days above 30 °C), running totals (rain deficit) and calendar-month windows, so the
+arable use case still has five weather columns in its base table; a derived `start_week` from `start_date`.
 
 ## Architecture
 
@@ -101,6 +180,9 @@ predictor/
 │   ├── dashboard.html   self-contained stakeholder dashboard (served at /)
 │   ├── service.py       policy check -> validation -> typed matrix -> runner -> response
 │   ├── validation.py    JSON Schema validation, finite numbers, out-of-range warnings
+│   ├── joins.py         joining lookup tables (numpy only): the engine used by training and serving
+│   ├── join_checks.py   automatic key check and join suggestions
+│   ├── join_values.py   strict dates, key text, "did you mean"
 │   ├── policy.py        per-use-case data-protection rules
 │   ├── manifest.py      strict manifest model, validated at startup
 │   ├── ports.py         ModelRunner and ModelRegistry interfaces
@@ -109,9 +191,9 @@ predictor/
 │   ├── onnx_runner.py   ONNX Runtime (CPU)
 │   ├── fs_registry.py   versioned models on the filesystem, atomic publish
 │   └── sources.py       csv-file, jsonl-file, parquet-file readers
-├── trainer/         profiling, model candidates, ONNX export and parity check
+├── trainer/         profiling, joins (join.py), model candidates, ONNX export and parity check
 ├── bootstrap.py     composition root: the only place that wires core to adapters
-└── cli.py           predictor init | train | list | serve
+└── cli.py           predictor init | train | check-joins | list | serve
 usecases/<id>/manifest.json   configuration only (enforced by tests)
 ```
 
@@ -130,7 +212,12 @@ also works in the offline container, and it adapts to every use case from the AP
   or "random checks vs. the model" (anomaly detection);
 - why this model was chosen (simple vs. advanced model), what matters most, and the privacy rules;
 - **Try it yourself**: sliders for every input and an instant answer. The raw request and response
-  JSON are under "Technical details", including the refusal when private data is sent.
+  JSON are under "Technical details", including the refusal when private data is sent;
+- **only for use cases with `joins`**: a *Connected data* card (what each table adds, how well it matched, how much of
+  the prediction it explains), a *Look up / Enter myself* switch per join in the form (a date picker and dropdowns for the
+  join inputs instead of the joined sliders), and a "Looked up from connected data" list with the values the service
+  filled in. All of it is built from `GET /models/{id}` (`joins`, `inputs[].derived_by`) and the `filled_in` field of a
+  prediction, so a new dataset with joins needs no dashboard code. Use cases without joins look exactly as before.
 
 For the in-depth version of the same story, see the technical notebook below.
 
@@ -183,6 +270,7 @@ an unknown category, or NaN/Infinity.
   "use_case_id": "absence-forecast",            // must equal the directory name
   "description": "...",
   "data_source": { "adapter": "csv-file", "path": "data/absence.csv" },
+  "joins": [],                                  // optional: connect other tables, see "Joining datasets" below
   "training": {
     "target": "absence_pct",                    // omit for anomaly detection
     "task": "auto",                             // auto | regression | classification | anomaly

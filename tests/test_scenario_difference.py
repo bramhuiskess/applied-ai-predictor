@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import repoint_nursery, write_nursery_tables
 from predictor import bootstrap
 from predictor.core.manifest import ManifestError, ScenarioConfig, load_manifest
 from predictor.core.scenario import compare, summarise
@@ -123,13 +124,13 @@ def test_invalid_money_settings_fail_fast(tmp_path, output, message):
 @pytest.fixture(scope="module")
 def nursery(tmp_path_factory):
     root = tmp_path_factory.mktemp("nursery-diff")
-    df, sim, batches = make_nursery.generate(knmi.synthetic_daily("2015-06-01", "2025-12-31", seed=5),
-                                             compartments=10, seed=12)
-    df.to_csv(root / "nursery.csv", index=False)
+    daily = knmi.synthetic_daily("2015-06-01", "2025-12-31", seed=5)
+    df, sim, batches = make_nursery.generate(daily, compartments=10, seed=12)
+    write_nursery_tables(root, df, daily, sim)
     registry = bootstrap.build_registry(root / "models")
     for use_case in ("nursery-gas", "nursery-harvest-weeks"):
         manifest = json.loads((ROOT / "usecases" / use_case / "manifest.json").read_text())
-        manifest["data_source"]["path"] = str(root / "nursery.csv")
+        repoint_nursery(manifest, root)
         directory = root / "usecases" / use_case
         directory.mkdir(parents=True)
         (directory / "manifest.json").write_text(json.dumps(manifest))

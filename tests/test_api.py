@@ -164,6 +164,7 @@ def test_dashboard_is_served_without_external_resources(client):
     assert response.status_code == 200
     assert "Prediction Dashboard" in response.text
     assert "https://" not in response.text  # must work in the offline container
+    assert "renderJoins" in response.text and "joinsOf().length" in response.text  # join UI exists, but is opt-in
 
 
 def test_evaluation_for_charts(client):

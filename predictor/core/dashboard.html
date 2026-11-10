@@ -122,6 +122,18 @@
   ul.rules { margin: 0; padding-left: 20px; display: grid; gap: 8px; font-size: 14px; }
   ul.rules li::marker { color: var(--accent); }
   .tag { display: inline-block; background: var(--bad-soft); color: var(--bad); font-size: 12px; padding: 1px 8px; border-radius: 999px; margin: 2px 4px 0 0; }
+  .joinbox { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+  .joinbox .jhead { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; font-size: 14px; }
+  .joinbox .jhead small { display: block; color: var(--muted); font-size: 12px; }
+  .joinbox .field:last-child { margin-bottom: 0; }
+  .field input[type=date], .field input[type=text] { font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--line);
+           border-radius: 6px; background: var(--card); color: var(--ink); }
+  .joinlist { display: grid; gap: 16px; }
+  .jitem p { margin: 4px 0; font-size: 14px; }
+  .jtag { font-style: normal; font-size: 11px; color: var(--accent); background: var(--soft); padding: 1px 7px; border-radius: 999px; margin-left: 4px; }
+  .filled { margin-top: 12px; font-size: 13px; color: var(--muted); }
+  .filled ul { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+  .filled b { color: var(--ink); }
   footer { max-width: 1160px; margin: 0 auto; padding: 0 20px 32px; color: var(--muted); font-size: 13px; }
   code { font-size: 12.5px; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
   #tooltip { position: fixed; pointer-events: none; background: #0f1623; color: #fff; font-size: 12px; padding: 6px 9px;
@@ -150,7 +162,7 @@
 "use strict";
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
-const state = { useCases: [], meta: null, evaluation: null, values: {}, seq: 0, timer: null };
+const state = { useCases: [], meta: null, evaluation: null, values: {}, seq: 0, timer: null, joinMode: {}, joinValues: {} };
 
 const TASKS = { regression: "Predicts a number", classification: "Predicts an outcome", anomaly: "Spots unusual cases" };
 
@@ -282,6 +294,7 @@ function render() {
         </div>
       </div>
     </section>
+    ${joinsOf().length ? `<section class="card" id="joins" style="margin-bottom:16px"></section>` : ""}
     <section class="grid even">
       <div class="card" id="importance"></div>
       <div class="card" id="policy"></div>
@@ -290,6 +303,7 @@ function render() {
   renderSide();
   renderImportance();
   renderPolicy();
+  if (joinsOf().length) renderJoins();
   renderForm();
 }
 
@@ -447,7 +461,7 @@ function renderImportance() {
     el.remove();
     return;
   }
-  const items = Object.entries(fi).slice(0, 5).map(([name, v]) => ({ label: pretty(name), value: v, text: pct(v) }));
+  const items = Object.entries(fi).slice(0, 5).map(([name, v]) => ({ label: pretty(name), value: v, text: pct(v), tag: joinTitleOf(name) }));
   el.innerHTML = `<h2>What matters most</h2>
     <p class="caption">How much each piece of information influences the prediction (top ${items.length}).</p>
     ${hbars(items, items[0].value, "chosen")}`;
@@ -466,6 +480,109 @@ function renderPolicy() {
   $("#policy").innerHTML = `<h2>Privacy and safety rules</h2>
     <p class="caption">Set per use case and checked on every single request.</p>
     <ul class="rules">${rules.map(text => `<li>${text}</li>`).join("")}</ul>`;
+}
+
+// ------------------------------------------------------------------ connected data (only for use cases with joins)
+// Everything below is driven by meta.joins from GET /models/{id}: no use case is named here.
+
+const joinsOf = () => state.meta?.joins || [];
+const inputByName = name => state.meta.inputs.find(i => i.name === name);
+const joinMode = j => state.joinMode[j.name] || "lookup";
+function joinTitleOf(column) {
+  const name = inputByName(column)?.derived_by;
+  return name ? (joinsOf().find(j => j.name === name)?.title || name) : undefined;
+}
+
+function initJoinState() {
+  state.joinMode = {};
+  state.joinValues = {};
+  for (const j of joinsOf()) for (const input of j.inputs) {
+    if (input.name in state.joinValues || inputByName(input.name)) continue;  // a model input has its own control
+    state.joinValues[input.name] = input.example ?? (input.role === "key" ? input.allowed_values?.[0] : input.range?.[1]) ?? "";
+  }
+}
+
+function renderJoins() {
+  const fi = state.evaluation.feature_importance || {};
+  $("#joins").innerHTML = `<h2>Connected data</h2>
+    <p class="caption">This model combines the main table with other tables. For each one you see how it was connected and how well it matched.</p>
+    <div class="joinlist">${joinsOf().map(j => {
+      const matched = j.matched == null ? "" : `<span class="pill ${j.matched >= 0.999 ? "ok" : ""}">${pct(j.matched, j.matched >= 0.999 ? 0 : 1)} of the records matched</span>`;
+      const dropped = j.dropped_rows ? `<span class="pill">${j.dropped_rows.toLocaleString("en")} records left out (no match)</span>` : "";
+      const share = j.fills.reduce((sum, c) => sum + (fi[c] || 0), 0);
+      const influence = share > 0 ? `<span class="pill">Share of the prediction: ${pct(share)}</span>` : "";
+      const provides = j.fills.map(c => `<span class="pill">${esc(pretty(c))}${j.units[c] ? ` (${esc(j.units[c])})` : ""}</span>`).join(" ");
+      const range = j.lookup_range ? `, ${esc(j.lookup_range[0])} to ${esc(j.lookup_range[1])}` : "";
+      const outside = j.fallback === "climatology"
+        ? "Outside the dates it knows, the average of the same period in other years is used, and the answer says so."
+        : j.lookup_range ? "Outside the dates it knows, the request is refused." : "";
+      return `<div class="jitem"><div><b>${esc(j.title)}</b> ${matched} ${dropped} ${influence}</div>
+        <p>${esc(j.summary)}</p>
+        <p class="sub">Provides: ${provides}</p>
+        <p class="sub">From ${j.source_file ? `<code>${esc(j.source_file)}</code>` : "a lookup table"} (${(j.lookup_rows || 0).toLocaleString("en")} rows${range}). ${esc(outside)}</p></div>`;
+    }).join("")}</div>`;
+}
+
+function joinInputField(input) {
+  const value = state.joinValues[input.name] ?? "", name = esc(input.name);
+  let control, hint = "";
+  if (input.role === "key" && input.allowed_values) {
+    control = `<select data-jin="${name}">${input.allowed_values.map(v => `<option${v === value ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
+  } else if (input.role === "date") {
+    control = `<input type="date" data-jin="${name}" value="${esc(value)}">`;
+    if (input.range) hint = `<span>data: ${esc(input.range[0])} – ${esc(input.range[1])}</span>`;
+  } else {
+    control = `<input type="text" data-jin="${name}" value="${esc(value)}">`;
+  }
+  return `<div class="field"><label title="${name}">${esc(pretty(input.name))}${hint}</label><div class="inputs">${control}</div></div>`;
+}
+
+function joinBox(j, field) {
+  const mode = joinMode(j);
+  const own = state.meta.inputs.map((input, i) => j.fills.includes(input.name) ? field(input, i) : "").join("");
+  const lookup = j.inputs.filter(i => !inputByName(i.name)).map(joinInputField).join("")
+    || `<p class="sub" style="margin:0">Looked up from the values above.</p>`;
+  const button = (m, text) => `<button type="button" data-mode="${m}" class="${mode === m ? "on" : ""}">${text}</button>`;
+  return `<div class="joinbox"><div class="jhead">
+      <div><b>${esc(j.title)}</b><small>${esc(j.fills.map(pretty).join(", "))}: filled in automatically</small></div>
+      <div class="switch" data-joinswitch="${esc(j.name)}">${button("lookup", "Look up")}${button("own", "Enter myself")}</div></div>
+    <div data-jlookup${mode === "lookup" ? "" : " hidden"}>${lookup}</div>
+    <div data-jown${mode === "own" ? "" : " hidden"}>${own}</div></div>`;
+}
+
+function setJoinMode(button) {
+  const box = button.closest(".joinbox");
+  state.joinMode[button.parentElement.dataset.joinswitch] = button.dataset.mode;
+  box.querySelectorAll("[data-joinswitch] button").forEach(b => b.classList.toggle("on", b === button));
+  box.querySelector("[data-jlookup]").hidden = button.dataset.mode !== "lookup";
+  box.querySelector("[data-jown]").hidden = button.dataset.mode !== "own";
+  schedule();
+}
+
+// In look-up mode the request carries the join inputs (compartment, start date) instead of the joined values.
+function requestFeatures(extra) {
+  const features = { ...state.values, ...(extra || {}) };
+  for (const j of joinsOf()) {
+    if (joinMode(j) !== "lookup") continue;
+    j.fills.forEach(name => delete features[name]);
+    j.inputs.forEach(i => { if (!inputByName(i.name) && state.joinValues[i.name]) features[i.name] = state.joinValues[i.name]; });
+  }
+  return features;
+}
+
+function filledIn(p) {
+  if (!p.filled_in) return "";
+  const lines = joinsOf().map(j => {
+    const columns = j.fills.filter(c => c in p.filled_in);
+    if (!columns.length) return "";
+    const using = j.inputs.map(i => state.joinValues[i.name] ?? state.values[i.name]).filter(v => v !== undefined && v !== "").join(", ");
+    const values = columns.map(c => {
+      const v = p.filled_in[c];
+      return `${esc(pretty(c))} <b>${typeof v === "number" ? fmt(v) : esc(v)}</b>${j.units[c] ? " " + esc(j.units[c]) : ""}`;
+    }).join(" · ");
+    return `<li><b>${esc(j.title)}</b> for ${esc(using)}: ${values}</li>`;
+  }).filter(Boolean);
+  return lines.length ? `<div class="filled">Looked up from connected data:<ul>${lines.join("")}</ul></div>` : "";
 }
 
 function typicalValues() {
@@ -494,7 +611,8 @@ function renderForm() {
   $("#reset").onclick = renderForm;
   if ($("#forbidden")) $("#forbidden").onclick = () => predict({ [policy.forbidden_fields[0]]: "example" });
 
-  $("#form").innerHTML = state.meta.inputs.map((input, i) => {
+  initJoinState();
+  const field = (input, i) => {
     const value = state.values[input.name], unit = input.unit ? ` (${esc(input.unit)})` : "";
     let control;
     if (input.kind === "categorical") {
@@ -508,9 +626,13 @@ function renderForm() {
     }
     const range = input.training_range ? `<span>usual: ${tick(input.training_range[0])} – ${tick(input.training_range[1])}</span>` : "";
     return `<div class="field"><label title="${esc(input.name)}">${esc(pretty(input.name))}${unit}${range}</label><div class="inputs">${control}</div></div>`;
-  }).join("");
+  };
+  const connected = new Set(joinsOf().flatMap(j => j.fills));  // columns a join fills in: shown in their join box
+  $("#form").innerHTML = state.meta.inputs.map((input, i) => connected.has(input.name) ? "" : field(input, i)).join("")
+    + joinsOf().map(j => joinBox(j, field)).join("");
 
   $("#form").oninput = $("#form").onchange = e => {
+    if (e.target.dataset.jin) { state.joinValues[e.target.dataset.jin] = e.target.value; schedule(); return; }
     const input = state.meta.inputs[e.target.dataset.i];
     if (!input) return;
     if (e.target.tagName === "SELECT") state.values[input.name] = e.target.value;
@@ -524,6 +646,8 @@ function renderForm() {
     schedule();
   };
   $("#form").onclick = e => {
+    const mode = e.target.closest("[data-joinswitch] button");
+    if (mode) { setJoinMode(mode); return; }
     const button = e.target.closest(".switch button");
     if (!button) return;
     const sw = button.parentElement, input = state.meta.inputs[sw.dataset.i];
@@ -538,7 +662,7 @@ function schedule() { clearTimeout(state.timer); state.timer = setTimeout(predic
 
 async function predict(extra) {
   const id = state.meta.use_case_id, seq = ++state.seq;
-  const body = { records: [{ record_id: "dashboard", features: { ...state.values, ...(extra || {}) } }] };
+  const body = { records: [{ record_id: "dashboard", features: requestFeatures(extra) }] };
   $("#request").textContent = `POST /models/${id}/predict\n\n` + JSON.stringify(body, null, 2);
   const result = await api(`/models/${id}/predict`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -597,6 +721,7 @@ function renderVisual(result) {
       <p class="sub" style="margin:10px 0 0">${anomaly ? "This combination of values does not match what the model usually sees." : "This combination of values is in line with normal operation."}</p>
       ${meter((p.anomaly_score - lo) / ((hi - lo) || 1), "linear-gradient(90deg, #fda29b, #fef0c7 40%, #dcfae6)", "very unusual", "very typical")}`;
   }
+  html += filledIn(p);
   if (p.warnings.length) html += `<ul class="msgs">${p.warnings.map(w => `<li class="warn"><b>Note:</b> ${friendlyWarning(w)}</li>`).join("")}</ul>`;
   el.innerHTML = html;
 }
@@ -614,7 +739,7 @@ function meter(position, background, left, right) {
 function hbars(items, max, cls = "") {
   return `<div class="hbars">${items.map(i => `
     <div class="hbar ${i.cls ?? cls}">
-      <div class="row"><span>${esc(i.label)}</span><b>${i.text}</b></div>
+      <div class="row"><span>${esc(i.label)}${i.tag ? ` <em class="jtag">${esc(i.tag)}</em>` : ""}</span><b>${i.text}</b></div>
       <div class="track"><div class="fill" style="width:${Math.max(0.5, i.value / (max || 1) * 100)}%"></div></div>
     </div>`).join("")}</div>`;
 }

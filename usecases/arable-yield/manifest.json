@@ -4,8 +4,52 @@
   "description": "Crop yield per hectare from the growing-season weather (CBS + KNMI, real data). Backtest: trained up to 2020, tested on 2021-2025.",
   "data_source": {
     "adapter": "csv-file",
-    "path": "data/arable.csv"
+    "path": "data/arable_base.csv"
   },
+  "joins": [
+    {
+      "name": "season-weather",
+      "source": {
+        "adapter": "csv-file",
+        "path": "data/weather_provinces.csv"
+      },
+      "keys": {
+        "province": "province"
+      },
+      "time": {
+        "lookup": "date"
+      },
+      "window": {
+        "start": {
+          "column": "season_start"
+        },
+        "end": {
+          "column": "season_end",
+          "offset": 1
+        }
+      },
+      "aggregate": {
+        "season_temp_c": {
+          "column": "temp_mean_c",
+          "op": "mean",
+          "round": 2
+        },
+        "season_rain_mm": {
+          "column": "rain_mm",
+          "op": "sum",
+          "round": 1
+        },
+        "season_radiation_mj_m2": {
+          "column": "radiation_j_cm2",
+          "op": "sum",
+          "scale": 0.01,
+          "round": 1
+        }
+      },
+      "fallback": "climatology",
+      "min_coverage": 0.8
+    }
+  ],
   "training": {
     "target": "yield_t_ha",
     "task": "regression",

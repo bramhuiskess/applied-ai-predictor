@@ -86,10 +86,13 @@ def test_documented_example_works_on_the_real_nursery_manifest(tmp_path):
     import knmi
     import make_nursery
 
-    df, _, _ = make_nursery.generate(knmi.synthetic_daily("2015-06-01", "2025-12-31"), compartments=4)
-    df.to_csv(tmp_path / "nursery.csv", index=False)
+    from conftest import repoint_nursery, write_nursery_tables
+
+    daily = knmi.synthetic_daily("2015-06-01", "2025-12-31")
+    df, sim, _ = make_nursery.generate(daily, compartments=4)
+    write_nursery_tables(tmp_path, df, daily, sim)
     manifest = json.loads((root / "usecases" / "nursery-gas" / "manifest.json").read_text())
-    manifest["data_source"]["path"] = str(tmp_path / "nursery.csv")
+    repoint_nursery(manifest, tmp_path)
     (tmp_path / "usecases" / "nursery-gas").mkdir(parents=True)
     (tmp_path / "usecases" / "nursery-gas" / "manifest.json").write_text(json.dumps(manifest))
     train_use_case(tmp_path / "usecases" / "nursery-gas", bootstrap.build_registry(tmp_path / "models"))
