@@ -51,11 +51,17 @@ class UseCase:
     manifest: Manifest
     model: LoadedModel | None
     validator: FeatureValidator | None
-    support: SupportIndex | None = None
+    supports: dict[str, SupportIndex] | None = None  # comparable-cases map per output (target name)
+    alias_of: tuple[str, str] | None = None  # (use case, output) when this is a single-output view of another one
 
     @property
     def status(self) -> str:
         return "ready" if self.model else "not_trained"
+
+    @property
+    def descriptors(self) -> dict[str, dict[str, Any]]:
+        """target name -> descriptor of every output (what the scenario code needs for margins and units)."""
+        return {om.descriptor.get("target_name") or om.name: om.descriptor for om in self.model.outputs.values()}
 
 
 @dataclass
@@ -91,11 +97,16 @@ class PredictionService:
                 check_schema(manifest.use_case_id, manifest.policy, model.feature_schema)
                 check_scenario(manifest.use_case_id, manifest.scenario, model.feature_schema)
                 _check_joined_levers(manifest, model)
+                _check_outputs_match(manifest, model)
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
-            support = SupportIndex(model.support) if model and model.support and manifest.scenario else None
-            use_cases.append(UseCase(manifest, model, validator, support))
+            supports = _supports(manifest, model)
+            use_cases.append(UseCase(manifest, model, validator, supports))
+            for alias, output in manifest.aliases.items():  # an old id keeps working as one output of this use case
+                view = manifest.single_output(output, alias)
+                only = model.only(output) if model else None
+                use_cases.append(UseCase(view, only, validator, _supports(view, only), (manifest.use_case_id, output)))
         return cls(use_cases, monitor)
 
     # ------------------------------------------------------------------ queries
@@ -108,6 +119,8 @@ class PredictionService:
                 "status": uc.status,
                 "task_type": uc.model.descriptor["task_type"] if uc.model else None,
                 "model_version": uc.model.version if uc.model else None,
+                "outputs": list(uc.model.outputs) if uc.model else None,
+                "alias_of": {"use_case_id": uc.alias_of[0], "output": uc.alias_of[1]} if uc.alias_of else None,
             }
             for uc in self._use_cases.values()
         ]
@@ -128,6 +141,8 @@ class PredictionService:
             "classes": descriptor.get("classes"),
             "metrics": descriptor.get("metrics"),
             "trained_at": descriptor.get("trained_at"),
+            "outputs": {name: _summary(om.descriptor, "classes", "metrics", "trained_at")
+                        for name, om in uc.model.outputs.items()},
             "inputs": [
                 {
                     "name": name,
@@ -141,7 +156,7 @@ class PredictionService:
             ],
             "joins": _describe_joins(uc),
             "policy": uc.manifest.policy.model_dump(),
-            "scenario": describe_scenario(uc.manifest.scenario, schema, descriptor),
+            "scenario": describe_scenario(uc.manifest.scenario, schema, _scenario_descriptors(uc)),
             "feature_schema": schema,
         }
 
@@ -162,6 +177,8 @@ class PredictionService:
             "feature_importance": descriptor.get("feature_importance"),
             "split": descriptor.get("split"),
             "sample": descriptor.get("evaluation"),
+            "outputs": {name: _summary(om.descriptor, "metrics", "candidates", "reference", "feature_importance", "split")
+                        | {"sample": om.descriptor.get("evaluation")} for name, om in uc.model.outputs.items()},
         }
 
     # --------------------------------------------------------------- scenarios
@@ -199,7 +216,7 @@ class PredictionService:
     @staticmethod
     def _scenario_result(uc: UseCase, name: str, changes: list, features: dict, warnings: list,
                          base_row: dict, base_out: dict, out: dict, sure: dict | None) -> dict[str, Any]:
-        cfg, descriptor = uc.manifest.scenario, uc.model.descriptor
+        cfg, descriptor = uc.manifest.scenario, _scenario_descriptors(uc)
         comparison = compare(cfg, descriptor, base_row, base_out, features, out)
         return {"name": name, "changes": changes, "features": features, "warnings": warnings, "outputs": out,
                 "difference": comparison["outputs"], "net_eur": comparison["net_eur"], "certainty": sure,
@@ -207,11 +224,25 @@ class PredictionService:
 
     @staticmethod
     def _certainty(uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
-        """How many comparable training cases each row has (None when not available)."""
-        if uc.support is None:
+        """How many comparable training cases each row has (None when not available).
+
+        Every output has its own map (its rows, its important inputs). With several outputs a row shows the weakest
+        one, so the message never promises more than the least certain output, plus the numbers per output.
+        """
+        if not uc.supports:
             return [None] * len(rows)
-        counts = uc.support.comparable(uc.validator.to_matrix(rows))
-        return [certainty(c, uc.manifest.scenario.case_label) for c in counts]
+        matrix = uc.validator.to_matrix(rows)
+        label = uc.manifest.scenario.case_label
+        per_output = {name: uc.supports[name].comparable(matrix) for name in uc.supports}
+        result = []
+        for i in range(len(rows)):
+            counts = {name: counts[i] for name, counts in per_output.items()}
+            weakest = certainty(min(counts.values()), label)
+            if len(counts) > 1:
+                weakest["by_output"] = {name: {k: v for k, v in certainty(c, label).items() if k != "message"}
+                                        for name, c in counts.items()}
+            result.append(weakest)
+        return result
 
     def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
               stop: float | None = None, step: float | None = None) -> dict[str, Any]:
@@ -228,7 +259,7 @@ class PredictionService:
         sure = self._certainty(uc, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
-                                                       uc.model.descriptor)["levers"] if l["name"] == lever)
+                                                       _scenario_descriptors(uc))["levers"] if l["name"] == lever)
         seen = lever_info["training_range"]
         return {
             **self._header(uc),
@@ -236,7 +267,7 @@ class PredictionService:
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
                      "value": resolved.base[lever], "outputs": outputs[0], "certainty": sure[0]},
             "points": [{"value": v, "outputs": out,
-                        "difference": compare(uc.manifest.scenario, uc.model.descriptor, resolved.base, outputs[0],
+                        "difference": compare(uc.manifest.scenario, _scenario_descriptors(uc), resolved.base, outputs[0],
                                               s.features, out)["outputs"],
                         "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1],
                         "certainty": c}
@@ -273,23 +304,25 @@ class PredictionService:
         return resolved
 
     def _outputs(self, uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Model outputs per row, keyed by output name (one output now; more with multi-output)."""
-        output = uc.model.runner.predict(uc.validator.to_matrix(rows))
-        target = uc.model.descriptor.get("target_name")
-        if uc.model.descriptor["task_type"] == "classification":
-            return [{target: {"value": output.values[i],
-                              "probabilities": {k: round(v, 6) for k, v in output.probabilities[i].items()}}}
-                    for i in range(len(rows))]
-        results = []
-        for i in range(len(rows)):
-            value, warning = self._bounded(uc, float(output.values[i]))
-            results.append({target: {"value": round(value, 6), **({"warning": warning} if warning else {})}})
+        """Model outputs per row, keyed by output name: one input matrix, every output's own model."""
+        matrix = uc.validator.to_matrix(rows)
+        results: list[dict[str, Any]] = [{} for _ in rows]
+        for om in uc.model.outputs.values():
+            output = om.runner.predict(matrix)
+            target = om.descriptor.get("target_name") or om.name
+            for i in range(len(rows)):
+                if om.descriptor["task_type"] == "classification":
+                    results[i][target] = {"value": output.values[i],
+                                          "probabilities": {k: round(v, 6) for k, v in output.probabilities[i].items()}}
+                else:
+                    value, warning = self._bounded(om.descriptor, float(output.values[i]))
+                    results[i][target] = {"value": round(value, 6), **({"warning": warning} if warning else {})}
         return results
 
     @staticmethod
-    def _bounded(uc: UseCase, value: float) -> tuple[float, str | None]:
+    def _bounded(descriptor: dict[str, Any], value: float) -> tuple[float, str | None]:
         """Keep a regression output within the target's physical limits (e.g. gas >= 0)."""
-        bounds = uc.model.descriptor.get("target_bounds")
+        bounds = descriptor.get("target_bounds")
         if not bounds:
             return value, None
         low, high = bounds
@@ -388,27 +421,34 @@ class PredictionService:
         return _Checked(record_id, features, errors, [*join_warnings, *warnings], filled)
 
     def _run(self, uc: UseCase, checked: list[_Checked]) -> list[dict[str, Any]]:
+        """One prediction per record. One output keeps the flat shape; several give an ``outputs`` map."""
         matrix = uc.validator.to_matrix([c.features for c in checked])
-        output = uc.model.runner.predict(matrix)
-        task = uc.model.descriptor["task_type"]
-        results = []
-        for i, c in enumerate(checked):
-            item: dict[str, Any] = {"record_id": c.record_id}
-            if task == "regression":
-                value, warning = self._bounded(uc, float(output.values[i]))
-                item["prediction"] = round(value, 6)
-                if warning:
-                    c.warnings.append(warning)
-            elif task == "classification":
-                item["prediction"] = output.values[i]
-                item["probabilities"] = {k: round(v, 6) for k, v in output.probabilities[i].items()}
-            else:
-                item["prediction"] = output.values[i]
-                item["anomaly_score"] = round(float(output.scores[i]), 6)
+        several = len(uc.model.outputs) > 1
+        results: list[dict[str, Any]] = [{"record_id": c.record_id} for c in checked]
+        for om in uc.model.outputs.values():
+            output = om.runner.predict(matrix)
+            task = om.descriptor["task_type"]
+            for i, c in enumerate(checked):
+                part: dict[str, Any] = {}
+                if task == "regression":
+                    value, warning = self._bounded(om.descriptor, float(output.values[i]))
+                    part["prediction"] = round(value, 6)
+                    if warning:
+                        c.warnings.append(f"{om.name}: {warning}" if several else warning)
+                elif task == "classification":
+                    part["prediction"] = output.values[i]
+                    part["probabilities"] = {k: round(v, 6) for k, v in output.probabilities[i].items()}
+                else:
+                    part["prediction"] = output.values[i]
+                    part["anomaly_score"] = round(float(output.scores[i]), 6)
+                if several:
+                    results[i].setdefault("outputs", {})[om.name] = part
+                else:
+                    results[i].update(part)
+        for item, c in zip(results, checked):
             item["warnings"] = c.warnings
             if c.filled:
                 item["filled_in"] = c.filled
-            results.append(item)
         return results
 
     def _header(self, uc: UseCase) -> dict[str, Any]:
@@ -420,6 +460,7 @@ class PredictionService:
             "task_type": descriptor["task_type"],
             "target_name": descriptor.get("target_name"),
             "target_unit": descriptor.get("target_unit"),
+            "outputs": {name: _summary(om.descriptor) for name, om in uc.model.outputs.items()},
         }
 
     def _monitor(
@@ -479,3 +520,37 @@ def _describe_joins(uc: UseCase) -> list[dict[str, Any]]:
     """For clients: how the model's inputs are connected to lookup tables and what can be sent instead."""
     return describe_joins(uc.model.joins, uc.model.descriptor, set(uc.model.feature_schema["properties"]),
                           uc.manifest.training.units)
+
+
+# ------------------------------------------------------------------------------ several outputs
+
+def _summary(descriptor: dict[str, Any], *extra: str) -> dict[str, Any]:
+    """The few descriptor keys a client needs per output (plus the ``extra`` ones)."""
+    keys = ("task_type", "algorithm", "target_name", "target_unit", *extra)
+    return {key: descriptor.get(key) for key in keys}
+
+
+def _scenario_descriptors(uc: UseCase) -> dict[str, Any]:
+    """What the scenario code needs: the descriptor (one output) or target name -> descriptor (several)."""
+    return uc.descriptors if len(uc.model.outputs) > 1 else uc.model.descriptor
+
+
+def _check_outputs_match(manifest: Manifest, model: LoadedModel) -> None:
+    """A use case that declares several outputs must be served from a version that has exactly those."""
+    declared = set(manifest.training.outputs)
+    if declared and declared != set(model.outputs):
+        raise ManifestError(f"{manifest.use_case_id}: the trained version has outputs {sorted(model.outputs)} but the "
+                            f"manifest declares {sorted(declared)}; retrain with `predictor train {manifest.use_case_id}`")
+    for alias, output in manifest.aliases.items():
+        if output not in model.outputs:
+            raise ManifestError(f"{manifest.use_case_id}: alias {alias!r} points at output {output!r}, which the trained "
+                                f"version does not have; retrain")
+
+
+def _supports(manifest: Manifest, model: LoadedModel | None) -> dict[str, SupportIndex] | None:
+    """The comparable-cases map of every output (keyed by target name), when scenarios need it and it was stored."""
+    if model is None or manifest.scenario is None:
+        return None
+    found = {om.descriptor.get("target_name") or om.name: SupportIndex(om.support)
+             for om in model.outputs.values() if om.support}
+    return found or None

@@ -170,10 +170,9 @@ def nursery(tmp_path_factory):
     df, sim, batches = make_nursery.generate(daily, compartments=10, seed=6)
     write_nursery_tables(root, df, daily, sim)
     registry = bootstrap.build_registry(root / "models")
-    for use_case in ("nursery-harvest-weeks", "nursery-gas"):
-        manifest = json.loads((ROOT / "usecases" / use_case / "manifest.json").read_text())
-        repoint_nursery(manifest, root)
-        train_use_case(write(root, manifest), registry)
+    manifest = json.loads((ROOT / "usecases" / "nursery" / "manifest.json").read_text())
+    repoint_nursery(manifest, root)
+    train_use_case(write(root, manifest), registry)  # one run trains every output; the old ids work as aliases
     client = TestClient(bootstrap.build_app(root / "usecases", root / "models"))
     return client, df, sim, {b["batch_id"]: b for b in batches}
 

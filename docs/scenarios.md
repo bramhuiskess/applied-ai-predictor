@@ -99,6 +99,11 @@ predict a flat line there, so a scenario at the edge looks like "no effect".
 `POST /models/{id}/scenario/check` takes the current situation (`base`) and up to 20 scenarios,
 and returns exactly what would be calculated, or one 422 that lists every problem at once.
 
+The nursery is one use case, `nursery`, with four outputs (`weeks_to_harvest`, `plants_sold`, `gas_m3`,
+`electricity_kwh`). The old ids (`nursery-gas`, `nursery-harvest-weeks`, `nursery-plants-sold`,
+`nursery-electricity`) are aliases: they still work and give the single-output answer of that output, as in the
+examples below.
+
 ```jsonc
 POST /models/nursery-gas/scenario/check
 {
@@ -160,7 +165,7 @@ same number as `/predict` for the same input (tested).
 ### Physical limits: `target_min` / `target_max`
 
 The first sweeps showed a model predicting **negative gas use** for a summer batch. A use case can now
-declare the limits of its output (`"target_min": 0` in the nursery manifests). Every prediction, in
+declare the limits of its output (`"target_min": 0` on the `gas_m3` and `electricity_kwh` outputs of the `nursery` manifest). Every prediction, in
 `/predict`, batches, scenarios and sweeps alike, stays within them, with a warning when the model
 went past the limit. The training metrics use the same limits, so the report matches what the API returns
 (nursery gas MAE 3,174 → 3,027 m³).
@@ -227,9 +232,10 @@ the answer key.
 
 **Limitations**
 - Money only counts outputs that have a model in this use case. "More lamp light" saves gas, but the
-  lamps' electricity is not counted until there is an electricity model (`electricity_kwh` is in the nursery data).
-- Combining several outputs (plants *and* gas) in one scenario needs the multi-output ticket; `outputs`,
-  `difference` and `net_eur` are already keyed by output so they work unchanged then.
+  lamps' electricity is only counted when `electricity_kwh` is declared with a price in `scenario.outputs`
+  (it is an output of the `nursery` use case).
+- Combining several outputs (plants *and* gas) in one scenario works on the `nursery` use case: `outputs`,
+  `difference` and `net_eur` are keyed by output, and `net_eur` sums the outputs that have a price.
 - The margin is the error of one prediction. The error of a *difference* between two predictions of the same
   batch is usually smaller, so the rule errs on the side of caution.
 
@@ -253,7 +259,10 @@ history, so this is mostly extrapolation.
 How it works: training stores a compact map of the training rows (every input standardised and
 weighted by how much the model uses it). Two cases are comparable when they are within a radius
 chosen so that a typical training case has about ten comparable cases. Levels: **low** 0-2,
-**medium** 3-9, **high** 10+. `scenario.case_label` names the cases ("batches").
+**medium** 3-9, **high** 10+. `scenario.case_label` names the cases ("batches"). With several outputs every output has its own map (its rows, the
+inputs it relies on). A scenario shows the **weakest** of them, so the message never promises more than the least
+certain output, and `certainty.by_output` gives the numbers per output. A one-output use case, or an alias, shows
+just its own.
 
 **Does it work? (the answer key)** `python scripts/check_scenarios.py --certainty` sweeps every lever
 for 60 unseen batches through the real engine (6,500 points per output) and compares the predicted
@@ -276,6 +285,6 @@ than 5,000 rows are subsampled and the counts scaled up.
 
 ### Not in this ticket
 
-- Several outputs in one use case (the multi-output tickets): `outputs` and `effects` are already
-  keyed by output name, so they work unchanged once a use case has more than one target.
+- Per-output retraining and outputs that depend on each other (weeks to harvest driving gas): outputs are
+  independent models on the same inputs.
 - A scenario panel in the dashboard (frontend).

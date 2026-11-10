@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 321 tests, die draaien ook op GitHub Actions
+- 376 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -94,6 +94,40 @@ weer in de 10 weken na `start_date`":
 - komt het venster buiten de data (volgend jaar), dan kan het manifest kiezen voor het gemiddelde van dezelfde periode in andere jaren, met een waarschuwing
 
 Zie [`docs/technical.md`](docs/technical.md#joining-datasets).
+
+De kwekerij is één use case, `nursery`, met vier uitkomsten (weken tot oogst, verkochte planten, gas, elektriciteit).
+De oude ids (`nursery-gas`, `nursery-harvest-weeks`, `nursery-plants-sold`, `nursery-electricity`) werken nog als alias.
+
+## Meerdere uitkomsten in één use case
+
+Een use case kan meerdere dingen tegelijk voorspellen uit dezelfde invoer, bijvoorbeeld gas én verkochte planten:
+
+- in het manifest staat `training.outputs` (naam → eenheid, grenzen, baseline, `algorithms`) in plaats van één `target`; `target` blijft werken voor één uitkomst
+- invoer, joins, privacyregels en levers declareer je één keer; één `predictor train` geeft één modelversie met een apart model per uitkomst
+- de uitkomsten zijn nooit elkaars features, dus er lekt niets van de ene uitkomst naar de andere
+- per uitkomst kies je het model met `algorithms`: één naam forceert dat model, meerdere namen beperken de keuze, weglaten werkt als vanouds (baseline vs. LightGBM)
+- `aliases` laten de oude use-case-ids doorwerken als losse use case met één uitkomst
+- `/predict` geeft bij meerdere uitkomsten een `outputs`-blok per record; bij één uitkomst is het antwoord ongewijzigd
+- het dashboard toont een chip per uitkomst en een lijst met alle uitkomsten
+
+```jsonc
+{
+  "use_case_id": "nursery",
+  "training": {
+    "time_column": "start_date",
+    "drop_columns": ["batch_id", "compartment"],
+    "outputs": {
+      "weeks_to_harvest": { "unit": "weeks" },
+      "gas_m3": { "unit": "m³", "target_min": 0, "algorithms": ["lightgbm"] },       // geforceerd
+      "electricity_kwh": { "unit": "kWh", "target_min": 0, "algorithms": ["blend", "lightgbm"] }   // keuze uit twee
+    }
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "aliases": { "nursery-gas": "gas_m3", "nursery-electricity": "electricity_kwh" }
+}
+```
+
+Zie [`docs/technical.md`](docs/technical.md#several-outputs).
 
 ## Nog te doen
 

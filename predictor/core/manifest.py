@@ -45,8 +45,53 @@ class TestGroup(_Strict):
     values: list[str] = Field(min_length=1)
 
 
+# The models a use case may be trained with, per task. A plain table so `core` needs no ML library; a test
+# keeps it equal to `trainer.models.candidates`.
+ALGORITHMS: dict[str, tuple[str, ...]] = {
+    "regression": ("linear_regression", "lightgbm", "blend"),
+    "classification": ("logistic_regression", "lightgbm"),
+    "anomaly": ("isolation_forest",),
+}
+
+
+# Names an output cannot have: it becomes a folder in the model directory next to these files.
+RESERVED_OUTPUT_NAMES = frozenset({"lookups", "report.md", "feature_schema.json", "use_case.json", "support.json",
+                                   "joins.json", "manifest.snapshot.json"})
+
+
+def valid_algorithms(task: str) -> tuple[str, ...]:
+    """The model names allowed for a task ("auto" can still become regression or classification)."""
+    if task == "auto":
+        return tuple(dict.fromkeys(ALGORITHMS["regression"] + ALGORITHMS["classification"]))
+    return ALGORITHMS[task]
+
+
+class OutputConfig(_Strict):
+    """One thing a use case predicts, with its own task, unit, physical limits, baseline and models."""
+
+    task: Literal["auto", "regression", "classification"] = "auto"
+    unit: str | None = None
+    target_min: float | None = None
+    target_max: float | None = None
+    baseline: Baseline | None = None
+    # Which models may be trained for this output: one name forces it, several restrict the contest.
+    algorithms: list[str] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> OutputConfig:
+        if (self.target_min is not None or self.target_max is not None) and self.task not in ("auto", "regression"):
+            raise ValueError("'target_min'/'target_max' only apply to regression")
+        if self.target_min is not None and self.target_max is not None and self.target_min >= self.target_max:
+            raise ValueError("'target_min' must be smaller than 'target_max'")
+        if self.baseline and self.task == "classification":
+            raise ValueError("'baseline' is for regression")
+        return self
+
+
 class TrainingConfig(_Strict):
     target: str | None = None
+    # Several outputs: name -> its own config. Use either `target` (one output) or `outputs`.
+    outputs: dict[str, OutputConfig] = {}
     task: Literal["auto", "regression", "classification", "anomaly"] = "auto"
     time_column: str | None = None
     horizon_steps: int | None = Field(default=None, ge=1)
@@ -66,9 +111,11 @@ class TrainingConfig(_Strict):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> TrainingConfig:
+        if self.outputs:
+            self._check_outputs()
         if self.task == "anomaly" and self.target:
             raise ValueError("an anomaly use case has no target; use 'evaluation_label' to score it")
-        if self.task in ("regression", "classification") and not self.target:
+        if self.task in ("regression", "classification") and not self.target and not self.outputs:
             raise ValueError(f"task '{self.task}' needs a 'target'")
         if self.horizon_steps and not self.time_column:
             raise ValueError("'horizon_steps' needs a 'time_column' to order the records")
@@ -84,15 +131,65 @@ class TrainingConfig(_Strict):
             raise ValueError("'test_from' needs a 'time_column' to know which records come after it")
         return self
 
+    def _check_outputs(self) -> None:
+        if self.target:
+            raise ValueError("use either 'target' (one output) or 'outputs' (several), not both")
+        if self.task != "auto":
+            raise ValueError("with 'outputs', set 'task' per output, not at the top level")
+        if self.target_min is not None or self.target_max is not None or self.baseline:
+            raise ValueError("with 'outputs', set 'target_min'/'target_max'/'baseline' per output")
+        if self.horizon_steps:
+            raise ValueError("'outputs' is not supported together with 'horizon_steps' yet")
+        if self.evaluation_label:
+            raise ValueError("'outputs' is not supported together with 'evaluation_label' (that is for anomaly use cases)")
+        for name, config in self.outputs.items():
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) or name in RESERVED_OUTPUT_NAMES:
+                raise ValueError(f"outputs.{name}: an output name is used as a folder name, so use letters, digits, '_' "
+                                 f"or '-' and not one of {', '.join(sorted(RESERVED_OUTPUT_NAMES))}")
+            for what, taken in (("time_column", {self.time_column}), ("drop_columns", set(self.drop_columns)),
+                                ("rename_columns", set(self.rename_columns))):
+                if name in taken:
+                    raise ValueError(f"outputs.{name}: is in {what}, so it cannot be an output")
+            if config.baseline and config.baseline.column in self.outputs:
+                raise ValueError(f"outputs.{name}.baseline: {config.baseline.column!r} is an output, not an input")
+        if self.test_group and self.test_group.column in self.outputs:
+            raise ValueError(f"test_group: {self.test_group.column!r} is an output, not an input")
+
+    def output_configs(self) -> dict[str, OutputConfig]:
+        """What the use case predicts, name -> config; the same for `target` and for `outputs`."""
+        if self.outputs:
+            return {name: cfg.model_copy(update={"unit": cfg.unit or self.units.get(name)})
+                    for name, cfg in self.outputs.items()}
+        if self.target:
+            return {self.target: OutputConfig(task=self.task, unit=self.units.get(self.target),
+                                              target_min=self.target_min, target_max=self.target_max,
+                                              baseline=self.baseline)}
+        return {}
+
     @property
-    def outputs(self) -> list[str]:
-        """What the use case predicts. One target for now; the multi-output ticket extends this."""
-        return [self.target] if self.target else []
+    def output_names(self) -> list[str]:
+        """The names of what the use case predicts, in the order of the manifest."""
+        return list(self.output_configs())
+
+    def for_output(self, name: str) -> TrainingConfig:
+        """This configuration seen from one output: a single-target config the trainer already knows.
+
+        The other outputs become `drop_columns`, so one output is never a feature of another.
+        """
+        config = self.output_configs()[name]
+        others = [other for other in self.outputs if other != name]
+        units = {**self.units, **({name: config.unit} if config.unit else {})}
+        return self.model_copy(update={
+            "target": name, "outputs": {}, "task": config.task, "target_min": config.target_min,
+            "target_max": config.target_max, "baseline": config.baseline, "units": units,
+            "drop_columns": [*self.drop_columns, *others]})
 
 
 class ModelRef(_Strict):
     runner: str = "onnx"
     version: str = "latest"
+    # Default for every output that does not name its own models; omitted = all models of the task compete.
+    algorithms: list[str] | None = Field(default=None, min_length=1)
 
 
 class MinGroupSize(_Strict):
@@ -298,6 +395,48 @@ class Manifest(_Strict):
     model: ModelRef = ModelRef()
     policy: Policy = Policy()
     scenario: ScenarioConfig | None = None
+    # Old or short ids that keep working for one output of this use case: {"nursery-gas": "gas_m3"}.
+    aliases: dict[str, str] = {}
+
+    def single_output(self, output: str, use_case_id: str) -> Manifest:
+        """This use case seen as one with a single output (an alias): same data, inputs, joins and policy."""
+        scenario = self.scenario
+        if scenario:
+            levers = {name: lever.model_copy(update={"effects": {k: v for k, v in lever.effects.items() if k == output}})
+                      for name, lever in scenario.levers.items()}
+            scenario = scenario.model_copy(update={"levers": levers,
+                                                   "outputs": {k: v for k, v in scenario.outputs.items() if k == output}})
+        return self.model_copy(update={"use_case_id": use_case_id, "aliases": {}, "scenario": scenario,
+                                       "training": self.training.for_output(output)})
+
+    @model_validator(mode="after")
+    def _check_outputs_and_models(self) -> Manifest:
+        t = self.training
+        for alias, output in self.aliases.items():
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", alias):
+                raise ValueError(f"aliases: {alias!r} must be a lowercase slug, e.g. 'nursery-gas'")
+            if alias == self.use_case_id:
+                raise ValueError(f"aliases: {alias!r} is the id of this use case itself")
+            if output not in t.output_names:
+                raise ValueError(f"aliases.{alias}: unknown output {output!r} (outputs: {', '.join(t.output_names) or 'none'})")
+        if len(set(self.aliases.values())) != len(self.aliases):
+            raise ValueError("aliases: every output can have only one alias")
+        # A model name must exist for the task of the output; without outputs the use case is anomaly detection.
+        tasks = {c.task for c in t.output_configs().values()} or {"anomaly"}
+        checks = [("model.algorithms", self.model.algorithms, tasks)]
+        checks += [(f"training.outputs.{name}.algorithms", cfg.algorithms, {cfg.task})
+                   for name, cfg in t.output_configs().items() if cfg.algorithms]
+        for where, names, kinds in checks:
+            valid = tuple(dict.fromkeys(n for kind in kinds for n in valid_algorithms(kind)))
+            unknown = [n for n in names or [] if n not in valid]
+            if unknown:
+                raise ValueError(f"{where}: unknown model(s) {unknown} (valid: {', '.join(valid)})")
+        for name, cfg in t.output_configs().items():  # the default must leave every output with a model of its task
+            if self.model.algorithms and not cfg.algorithms and cfg.task != "auto" \
+                    and not any(n in valid_algorithms(cfg.task) for n in self.model.algorithms):
+                raise ValueError(f"model.algorithms {self.model.algorithms} has no model for output {name!r} (a "
+                                 f"'{cfg.task}' output; valid: {', '.join(valid_algorithms(cfg.task))}); set 'algorithms' on it")
+        return self
 
     @model_validator(mode="after")
     def _check_joins(self) -> Manifest:
@@ -309,7 +448,7 @@ class Manifest(_Strict):
             raise ValueError("joins: not supported together with horizon_steps yet (rows without a match are dropped, "
                              "which would shift the forecast target)")
         renamed = set(t.rename_columns)
-        reserved = {"target": set(t.outputs), "time_column": {t.time_column},
+        reserved = {"target": set(t.output_names), "time_column": {t.time_column},
                     "evaluation_label": {t.evaluation_label}, "drop_columns": set(t.drop_columns)}
         created: dict[str, str] = {}
         forbidden = {f.lower() for f in self.policy.forbidden_fields}
@@ -340,12 +479,12 @@ class Manifest(_Strict):
         if self.scenario is None:
             return self
         t = self.training
-        if not t.outputs or t.task == "anomaly":
+        if not t.output_names or t.task == "anomaly":
             raise ValueError("scenario: needs a target to predict (anomaly use cases have no output to compare)")
         if t.horizon_steps:
             raise ValueError("scenario: not supported together with horizon_steps yet")
         not_features = {
-            "target": set(t.outputs), "time_column": {t.time_column}, "drop_columns": set(t.drop_columns),
+            "target": set(t.output_names), "time_column": {t.time_column}, "drop_columns": set(t.drop_columns),
             "evaluation_label": {t.evaluation_label},
         }
         forbidden = {f.lower() for f in self.policy.forbidden_fields}
@@ -356,13 +495,13 @@ class Manifest(_Strict):
             if name.lower() in forbidden:
                 raise ValueError(f"scenario.levers.{name}: is a forbidden field in the policy")
             for output in lever.effects:
-                if output not in t.outputs:
+                if output not in t.output_names:
                     raise ValueError(f"scenario.levers.{name}.effects: unknown output {output!r} "
-                                     f"(outputs: {', '.join(t.outputs)})")
+                                     f"(outputs: {', '.join(t.output_names)})")
         for output, config in self.scenario.outputs.items():
-            if output not in t.outputs:
-                raise ValueError(f"scenario.outputs: unknown output {output!r} (outputs: {', '.join(t.outputs)})")
-            if config.price_from and config.price_from in t.outputs:
+            if output not in t.output_names:
+                raise ValueError(f"scenario.outputs: unknown output {output!r} (outputs: {', '.join(t.output_names)})")
+            if config.price_from and config.price_from in t.output_names:
                 raise ValueError(f"scenario.outputs.{output}.price_from: {config.price_from!r} is an output, not an input")
         return self
 
@@ -408,6 +547,13 @@ def load_manifest(path: Path) -> Manifest:
 def load_all_manifests(usecases_dir: Path) -> list[Manifest]:
     usecases_dir = Path(usecases_dir)
     manifests = [load_manifest(p) for p in sorted(usecases_dir.glob(f"*/{MANIFEST_FILENAME}"))]
+    owner: dict[str, str] = {}
+    for manifest in manifests:  # a use case id and an alias must never name two different things
+        for name in (manifest.use_case_id, *manifest.aliases):
+            if name in owner:
+                raise ManifestError(f"{usecases_dir}: id {name!r} is used by both {owner[name]!r} and "
+                                    f"{manifest.use_case_id!r}")
+            owner[name] = manifest.use_case_id
     return manifests
 
 
