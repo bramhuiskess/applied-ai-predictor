@@ -505,9 +505,47 @@ def test_train_and_list_on_the_command_line_know_outputs_and_aliases(served, tmp
     assert "[y_linear, y_positive, y_flag]" in listed and "multi-linear" in listed and "alias of multi / y_linear" in listed
 
 
-def test_the_comparable_cases_map_is_built_once_and_every_output_reports_the_same_numbers(served):
+def test_every_output_has_its_own_comparable_cases_map_built_from_its_own_rows(served):
     version = served["root"] / "models" / "multi" / "1"
-    support = json.loads((version / "support.json").read_text())
+    assert not (version / "support.json").exists()  # nothing shared at the top
+    weights = {}
     for output in OUTPUTS:
+        support = json.loads((version / output / "support.json").read_text())
         certainty = json.loads((version / output / "descriptor.json").read_text())["certainty"]
         assert certainty == {"available": True, "training_rows": support["rows"], "radius": round(support["radius"], 6)}
+        weights[output] = {f["name"]: round(f["weight"], 3) for f in support["features"]}
+    assert weights["y_linear"] != weights["y_positive"]  # each output weights the inputs it really uses
+
+
+def test_a_scenario_shows_the_weakest_certainty_and_the_numbers_per_output(served):
+    body = served["client"].post("/models/multi/scenario", json={
+        "base": {"features": FEATURES}, "scenarios": [{"name": "more x1", "changes": {"x1": {"delta": 1}}}]}).json()
+    certainty = body["scenarios"][0]["certainty"]
+    by_output = certainty["by_output"]
+    assert set(by_output) == set(OUTPUTS) and all("message" not in v for v in by_output.values())
+    assert certainty["comparable_cases"] == min(v["comparable_cases"] for v in by_output.values())  # never promises more
+    assert body["base"]["certainty"]["by_output"].keys() == by_output.keys()
+    alias = served["client"].post("/models/multi-linear/scenario", json={
+        "base": {"features": FEATURES}, "scenarios": [{"name": "more x1", "changes": {"x1": {"delta": 1}}}]}).json()
+    assert alias["scenarios"][0]["certainty"]["comparable_cases"] == by_output["y_linear"]["comparable_cases"]
+    assert "by_output" not in alias["scenarios"][0]["certainty"]  # one output: the shape of before
+
+
+def test_the_typical_error_sentence_is_said_once_when_several_outputs_are_within_it():
+    from predictor.core.manifest import ScenarioConfig
+    from predictor.core.scenario import compare, summarise
+
+    cfg = ScenarioConfig.model_validate({"levers": {"x": {"min": 0, "max": 1, "step": 1}},
+                                         "outputs": {"gas": {"label": "Gas use"}, "plants": {"label": "Plants"}, "weeks": {"label": "Weeks"}}})
+    descriptors = {n: {"task_type": "regression", "target_unit": u, "metrics": {"mae": m}}
+                   for n, u, m in (("gas", "m3", 100.0), ("plants", "plants", 4000.0), ("weeks", "weeks", 0.9))}
+    before = {n: {"value": v} for n, v in (("gas", 1000.0), ("plants", 100000.0), ("weeks", 10.0))}
+    now = {n: {"value": v} for n, v in (("gas", 1050.0), ("plants", 101000.0), ("weeks", 8.0))}  # weeks changes by more than its error
+    text = summarise(cfg, descriptors, "warmer", compare(cfg, descriptors, {}, before, {}, now))
+    assert text.count("typical error") == 1 and "weeks 20.0% lower" in text
+    assert text.endswith("Within the model's typical error, so no clear effect: gas use (±100 m3), plants (±4,000 plants).")
+    assert "this is within" not in text  # nothing repeated inside the sentences
+    one = {"gas": now["gas"], "plants": before["plants"], "weeks": before["weeks"]}  # only one output within its error
+    single = summarise(cfg, descriptors, "warmer", compare(cfg, descriptors, {}, before, {}, one))
+    assert "; this is within the model's typical error of ±100 m3, so treat it as no clear effect" in single
+    assert "Within the model's typical error, so no clear effect" not in single  # one output keeps the inline wording

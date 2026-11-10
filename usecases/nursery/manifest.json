@@ -80,7 +80,7 @@
       "plants_sold": {
         "unit": "plants",
         "target_min": 0,
-        "algorithms": ["lightgbm"]
+        "algorithms": ["blend", "lightgbm"]
       },
       "gas_m3": {
         "unit": "m³",

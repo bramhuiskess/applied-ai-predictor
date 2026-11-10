@@ -51,7 +51,7 @@ class UseCase:
     manifest: Manifest
     model: LoadedModel | None
     validator: FeatureValidator | None
-    support: SupportIndex | None = None
+    supports: dict[str, SupportIndex] | None = None  # comparable-cases map per output (target name)
     alias_of: tuple[str, str] | None = None  # (use case, output) when this is a single-output view of another one
 
     @property
@@ -101,12 +101,12 @@ class PredictionService:
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
-            support = SupportIndex(model.support) if model and model.support and manifest.scenario else None
-            use_cases.append(UseCase(manifest, model, validator, support))
+            supports = _supports(manifest, model)
+            use_cases.append(UseCase(manifest, model, validator, supports))
             for alias, output in manifest.aliases.items():  # an old id keeps working as one output of this use case
                 view = manifest.single_output(output, alias)
-                use_cases.append(UseCase(view, model.only(output) if model else None, validator, support,
-                                         (manifest.use_case_id, output)))
+                only = model.only(output) if model else None
+                use_cases.append(UseCase(view, only, validator, _supports(view, only), (manifest.use_case_id, output)))
         return cls(use_cases, monitor)
 
     # ------------------------------------------------------------------ queries
@@ -224,11 +224,25 @@ class PredictionService:
 
     @staticmethod
     def _certainty(uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
-        """How many comparable training cases each row has (None when not available)."""
-        if uc.support is None:
+        """How many comparable training cases each row has (None when not available).
+
+        Every output has its own map (its rows, its important inputs). With several outputs a row shows the weakest
+        one, so the message never promises more than the least certain output, plus the numbers per output.
+        """
+        if not uc.supports:
             return [None] * len(rows)
-        counts = uc.support.comparable(uc.validator.to_matrix(rows))
-        return [certainty(c, uc.manifest.scenario.case_label) for c in counts]
+        matrix = uc.validator.to_matrix(rows)
+        label = uc.manifest.scenario.case_label
+        per_output = {name: uc.supports[name].comparable(matrix) for name in uc.supports}
+        result = []
+        for i in range(len(rows)):
+            counts = {name: counts[i] for name, counts in per_output.items()}
+            weakest = certainty(min(counts.values()), label)
+            if len(counts) > 1:
+                weakest["by_output"] = {name: {k: v for k, v in certainty(c, label).items() if k != "message"}
+                                        for name, c in counts.items()}
+            result.append(weakest)
+        return result
 
     def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
               stop: float | None = None, step: float | None = None) -> dict[str, Any]:
@@ -531,3 +545,12 @@ def _check_outputs_match(manifest: Manifest, model: LoadedModel) -> None:
         if output not in model.outputs:
             raise ManifestError(f"{manifest.use_case_id}: alias {alias!r} points at output {output!r}, which the trained "
                                 f"version does not have; retrain")
+
+
+def _supports(manifest: Manifest, model: LoadedModel | None) -> dict[str, SupportIndex] | None:
+    """The comparable-cases map of every output (keyed by target name), when scenarios need it and it was stored."""
+    if model is None or manifest.scenario is None:
+        return None
+    found = {om.descriptor.get("target_name") or om.name: SupportIndex(om.support)
+             for om in model.outputs.values() if om.support}
+    return found or None

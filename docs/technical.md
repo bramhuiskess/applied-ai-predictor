@@ -48,7 +48,7 @@ python scripts/make_nursery.py && python scripts/make_arable.py   # scenario dat
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 376 tests, ~2.5 min, fully offline
+pytest                            # 378 tests, ~2.5 min, fully offline
 ```
 
 ### Technical notebook
@@ -431,15 +431,16 @@ independent model per output on the same inputs, and publishes **one version** f
 
 ```
 models/nursery/<version>/
-├── use_case.json  feature_schema.json  report.md  (support.json, joins.json, ... as for any use case)
-├── weeks_to_harvest/   model.onnx  descriptor.json
-├── plants_sold/        model.onnx  descriptor.json
-├── gas_m3/             model.onnx  descriptor.json
-└── electricity_kwh/    model.onnx  descriptor.json
+├── use_case.json  feature_schema.json  report.md  (joins.json, lookups/ ... as for any use case)
+├── weeks_to_harvest/   model.onnx  descriptor.json  support.json
+├── plants_sold/        model.onnx  descriptor.json  support.json
+├── gas_m3/             model.onnx  descriptor.json  support.json
+└── electricity_kwh/    model.onnx  descriptor.json  support.json
 ```
 
-The feature schema, the "comparable cases" support and the join snapshot are written once, from the first
-output, and shared by all outputs. The inputs are profiled **once on all rows** (so every output reads the same
+The feature schema and the join snapshot are written once and shared by all outputs. The "comparable cases"
+map (`support.json`, only for use cases with a `scenario`) is built **per output**, from that output's own rows
+and the inputs that output relies on. The inputs are profiled **once on all rows** (so every output reads the same
 category codes, kinds and ranges even when an output misses rows that another has). `report.md` has one section per output (candidates, chosen model, what
 `algorithms` allowed, importance, parity). Retraining replaces all outputs together; there is no per-output
 retraining. Versions trained before this layout (a `descriptor.json` and `model.onnx` in the version root) still

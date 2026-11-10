@@ -42,6 +42,7 @@ class OutputModel:
     name: str
     descriptor: dict[str, Any]
     runner: ModelRunner
+    support: dict[str, Any] | None = None  # map of this output's training data, for "comparable cases"
 
 
 @dataclass
@@ -50,7 +51,6 @@ class LoadedModel:
 
     outputs: dict[str, OutputModel]
     feature_schema: dict[str, Any]
-    support: dict[str, Any] | None = None  # map of the training data, for "comparable cases"
     joins: JoinEngine | None = None  # lookup tables the model was trained with, to fill joined inputs
 
     @property
@@ -72,7 +72,7 @@ class LoadedModel:
 
     def only(self, output: str) -> LoadedModel:
         """The same version seen as a single-output model (used for the aliases of an output)."""
-        return LoadedModel({output: self.outputs[output]}, self.feature_schema, self.support, self.joins)
+        return LoadedModel({output: self.outputs[output]}, self.feature_schema, self.joins)
 
 
 class ModelRegistry(Protocol):

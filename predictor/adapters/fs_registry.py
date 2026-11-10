@@ -8,7 +8,7 @@ Layout (one version holds one model per output of the use case)::
         <output>/model.onnx  the artefact of one output (preprocessing + model in one graph)
         <output>/descriptor.json  that model's metadata (task, algorithm, metrics, ...)
         report.md            human-readable training report
-        support.json         (optional) map of the training data, for "comparable cases"
+        <output>/support.json  (optional) map of that output's training data, for "comparable cases"
         joins.json           (optional) the joins the model was trained with
         lookups/<name>.npz   (optional) snapshot of each lookup table, so the service needs no data files
 
@@ -43,6 +43,7 @@ RunnerFactory = Callable[[Path, dict[str, Any]], ModelRunner]
 class PublishedOutput:
     descriptor: dict[str, Any]
     artifact: bytes
+    files: dict[str, str] | None = None  # more files for this output's folder, e.g. support.json
 
 
 class FilesystemRegistry:
@@ -80,9 +81,9 @@ class FilesystemRegistry:
             factory = self._runners.get(descriptor["runner"])
             if factory is None:
                 raise LookupError(f"{use_case_id} v{version}: no runner installed for {descriptor['runner']!r}")
-            outputs[name] = OutputModel(name, descriptor, factory(folder / descriptor["artifact"], descriptor))
-        support_path = directory / SUPPORT
-        support = json.loads(support_path.read_text(encoding="utf-8")) if support_path.is_file() else None
+            support_path = folder / SUPPORT  # in the version folder itself for a version from before outputs existed
+            support = json.loads(support_path.read_text(encoding="utf-8")) if support_path.is_file() else None
+            outputs[name] = OutputModel(name, descriptor, factory(folder / descriptor["artifact"], descriptor), support)
         joins = None
         if (directory / JOINS).is_file():
             # The model is self-contained: joins come from this version's snapshot, never from the current manifest.
@@ -90,7 +91,7 @@ class FilesystemRegistry:
                 joins = JoinEngine.from_snapshot(lambda name: (directory / name).read_bytes())
             except (OSError, ValueError, KeyError) as exc:
                 raise LookupError(f"{use_case_id} v{version}: cannot load the join snapshot ({exc})") from exc
-        return LoadedModel(outputs=outputs, feature_schema=schema, support=support, joins=joins)
+        return LoadedModel(outputs=outputs, feature_schema=schema, joins=joins)
 
     def publish(
         self,
@@ -131,6 +132,10 @@ class FilesystemRegistry:
                 descriptor = {**published.descriptor, "model_version": version, "artifact": ARTIFACT_NAME}
                 (folder / ARTIFACT_NAME).write_bytes(published.artifact)
                 (folder / DESCRIPTOR).write_text(json.dumps(descriptor, indent=2), encoding="utf-8")
+                for file_name, content in (published.files or {}).items():
+                    if "/" in file_name or file_name.startswith("."):
+                        raise ValueError(f"file {file_name!r} of output {name!r} must be a plain file name")
+                    (folder / file_name).write_text(content, encoding="utf-8")
             # Written last: a version only counts once it exists.
             (staging / USE_CASE).write_text(json.dumps({"model_version": version, "outputs": list(outputs)}, indent=2),
                                             encoding="utf-8")

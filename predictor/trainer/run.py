@@ -64,7 +64,7 @@ def _load_table(manifest: Manifest, data_path: Path | None) -> _Table:
 
 
 def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowed: list[str] | None = None,
-                  shared: SharedFeatures | None = None, with_support: bool = True) -> _Trained:
+                  shared: SharedFeatures | None = None) -> _Trained:
     """Train, choose and export the model for the single target of ``cfg`` (profile, split, candidates, ONNX)."""
     df, source, base_rows, joined = table.df, table.source, table.base_rows, table.joined
     if joined and joined.consumed:  # dates that only place a window are join inputs, not model features
@@ -202,11 +202,11 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     # Map of the training data for "comparable cases" in scenarios. Only where it is needed
     # (a scenario section) and allowed (it holds transformed training rows: no personal data by default).
     support_file: dict[str, str] = {}
-    if manifest.scenario is not None and with_support:
+    if manifest.scenario is not None:
         if manifest.policy.evaluation_rows_allowed:
             support = build_support(X_fit.to_numpy(dtype="float64"), [f.kind for f in data.features], feature_names,
                                     [f.categories for f in data.features], descriptor["feature_importance"])
-            support_file["support.json"] = json.dumps(support)
+            support_file["support.json"] = json.dumps(support)  # stored in this output's own folder
             descriptor["certainty"] = {"available": True, "training_rows": support["rows"],
                                        "radius": round(support["radius"], 6)}
         else:
@@ -236,7 +236,7 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     trained: dict[str, _Trained] = {}
     for name in configs or ["anomaly"]:  # without a target the use case is anomaly detection
         view = manifest.training.for_output(name) if name in configs else manifest.training
-        trained[name] = _train_output(manifest, view, table, allowed.get(name), shared, with_support=not trained)
+        trained[name] = _train_output(manifest, view, table, allowed.get(name), shared)
     first_name, first = next(iter(trained.items()))
     for name, other in trained.items():
         if _encoding(other.schema) != _encoding(first.schema):
@@ -244,14 +244,12 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
                 f"{manifest.use_case_id}: output {name!r} ended up with other inputs than {first_name!r} "
                 f"({sorted(set(_encoding(other.schema).items()) ^ set(_encoding(first.schema).items()))[:4]}); "
                 "all outputs of a use case share one set of inputs, so fix the data or split the use case")
-        if "certainty" in first.descriptor:  # the map of comparable cases is built once, from the first output
-            other.descriptor["certainty"] = first.descriptor["certainty"]
     joined = table.joined
     version = registry.publish(
         manifest.use_case_id,
-        outputs={name: PublishedOutput(t.descriptor, t.artifact) for name, t in trained.items()},
+        outputs={name: PublishedOutput(t.descriptor, t.artifact, t.support_file) for name, t in trained.items()},
         feature_schema=first.schema,
-        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2), **first.support_file,
+        extra_files={"manifest.snapshot.json": manifest.model_dump_json(indent=2),
                      **(joined.engine.snapshot() if joined and joined.engine else {})},
     )
     described = {name: {**t.descriptor, "model_version": version} for name, t in trained.items()}

@@ -260,8 +260,15 @@ def compare(scenario: ScenarioConfig, descriptor: dict[str, Any], base_row: dict
 
 def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, comparison: dict[str, Any],
               certainty: dict[str, Any] | None = None) -> str:
-    """One plain sentence per scenario, for people who do not read JSON."""
+    """One plain sentence per scenario, for people who do not read JSON.
+
+    When several outputs change by less than the model's typical error, that is said once at the end ("no clear
+    effect: gas use (±3,028 m³), plants sold (±3,894 plants)") instead of after every output.
+    """
     parts = []
+    unclear = [o for o, i in comparison["outputs"].items() if i.get("exceeds_margin") is False and i.get("change")]
+    grouped = len(unclear) > 1
+    quiet: list[str] = []
     for output, item in comparison["outputs"].items():
         config = scenario.outputs.get(output)
         label = (config.label if config and config.label else output).lower()
@@ -281,13 +288,18 @@ def summarise(scenario: ScenarioConfig, descriptor: dict[str, Any], name: str, c
             detail += f", worth {_eur_text(item['eur'])}"
         sentence = f"{size} ({detail})"
         if item["exceeds_margin"] is False:
-            sentence += (f"; this is within the model's typical error of ±{item['margin']:,.{_decimals(item['margin'])}f} "
-                         f"{unit}, so treat it as no clear effect").rstrip()
+            margin = f"±{item['margin']:,.{_decimals(item['margin'])}f} {unit}".strip()
+            if grouped:
+                quiet.append(f"{label} ({margin})")
+            else:
+                sentence += f"; this is within the model's typical error of {margin}, so treat it as no clear effect"
         parts.append(sentence)
     text = f"{name}: " + "; ".join(parts)
     if comparison["net_eur"] is not None and len(comparison["outputs"]) > 1:
         text += f". Net worth {_eur_text(comparison['net_eur'])}"
     text += "."
+    if quiet:
+        text += f" Within the model's typical error, so no clear effect: {', '.join(quiet)}."
     if certainty:
         text += " " + certainty["message"]
     return text

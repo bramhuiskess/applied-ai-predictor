@@ -259,8 +259,10 @@ history, so this is mostly extrapolation.
 How it works: training stores a compact map of the training rows (every input standardised and
 weighted by how much the model uses it). Two cases are comparable when they are within a radius
 chosen so that a typical training case has about ten comparable cases. Levels: **low** 0-2,
-**medium** 3-9, **high** 10+. `scenario.case_label` names the cases ("batches"). With several outputs the map is
-built once, from the first output (its rows and its input weights), and used for every output.
+**medium** 3-9, **high** 10+. `scenario.case_label` names the cases ("batches"). With several outputs every output has its own map (its rows, the
+inputs it relies on). A scenario shows the **weakest** of them, so the message never promises more than the least
+certain output, and `certainty.by_output` gives the numbers per output. A one-output use case, or an alias, shows
+just its own.
 
 **Does it work? (the answer key)** `python scripts/check_scenarios.py --certainty` sweeps every lever
 for 60 unseen batches through the real engine (6,500 points per output) and compares the predicted

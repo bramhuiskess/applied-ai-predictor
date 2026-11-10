@@ -110,7 +110,8 @@ def kas(tmp_path_factory):
 
 def test_the_map_is_only_stored_where_needed_and_allowed(kas):
     root, _, results = kas
-    stored = {uc: (root / "models" / uc / "1" / "support.json").is_file() for uc in results}
+    # stored in the folder of the output ("gas")
+    stored = {uc: (root / "models" / uc / "1" / "gas" / "support.json").is_file() for uc in results}
     assert stored == {"kas": True, "kas-private": False, "kas-plain": False}
     assert results["kas"]["certainty"]["available"] is True
     assert results["kas-private"]["certainty"] == {"available": False,
