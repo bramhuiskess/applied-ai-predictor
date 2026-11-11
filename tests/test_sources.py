@@ -1,5 +1,6 @@
 """Data-source adapters: every supported input format must give the same table as the CSV file."""
  
+import io
 import json
  
 import pandas as pd
@@ -7,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from predictor import bootstrap
-from predictor.adapters.sources import SOURCES, adapter_for, read_table
+from predictor.adapters.sources import SOURCES, adapter_for, read_jsonl_stream, read_table
 from predictor.trainer.run import init_use_case, train_use_case
 
 DF = pd.DataFrame({
@@ -88,6 +89,65 @@ def test_corrupt_jsonl_is_refused(tmp_path):
     path.write_text('{"a": 1}\n{"a": \n')
     with pytest.raises(ValueError):
         read_table("jsonl-file", path)
+
+
+NESTED = [
+    {"timestamp": "2026-01-01 00:00:00", "climate": {"temp_c": 21.5, "hum_pct": 60.0}, "vent_on": 1},
+    {"timestamp": "2026-01-01 00:10:00", "climate": {"temp_c": 22.0, "hum_pct": 61.0}, "vent_on": 0},
+]
+FLAT = pd.DataFrame({
+    "timestamp": ["2026-01-01 00:00:00", "2026-01-01 00:10:00"],
+    "climate_temp_c": [21.5, 22.0],
+    "climate_hum_pct": [60.0, 61.0],
+    "vent_on": [1, 0],
+})
+
+
+@pytest.mark.parametrize("suffix", [".json", ".jsonl"])
+def test_nested_sensor_readings_are_flattened_to_the_flat_table(tmp_path, suffix):
+    path = tmp_path / f"sensors{suffix}"
+    path.write_text("\n".join(json.dumps(r) for r in NESTED) if suffix == ".jsonl" else json.dumps(NESTED))
+    table = read_table(adapter_for(path), path)
+    pd.testing.assert_frame_equal(table[FLAT.columns], FLAT, check_dtype=False)
+
+
+def test_jsonl_can_be_read_from_a_stream_that_is_not_a_file():
+    stream = io.StringIO('{"a": 1}\r\n\r\n{"a": 2}\r\n')
+    assert read_jsonl_stream(stream)["a"].tolist() == [1, 2]
+
+
+def test_jsonl_stream_is_read_lazily_line_by_line():
+    def feed():
+        yield '{"a": 1}\n'
+        yield '{"a": 2}\n'
+
+    assert read_jsonl_stream(feed())["a"].tolist() == [1, 2]
+
+
+def test_jsonl_with_a_byte_order_mark_is_accepted(tmp_path):
+    path = tmp_path / "bom.jsonl"
+    path.write_bytes(b'\xef\xbb\xbf{"a": 1}\n{"a": 2}\n')
+    assert read_table("jsonl-file", path)["a"].tolist() == [1, 2]
+
+
+def test_jsonl_does_not_convert_text_to_numbers(tmp_path):
+    path = tmp_path / "text.jsonl"
+    path.write_text('{"a": "1"}\n{"a": "2"}\n')
+    assert read_table("jsonl-file", path)["a"].tolist() == ["1", "2"] 
+
+
+def test_a_bad_jsonl_line_is_reported_with_its_line_number(tmp_path):
+    path = tmp_path / "bad.jsonl"
+    path.write_text('{"a": 1}\nnot json\n{"a": 3}\n')
+    with pytest.raises(ValueError, match="line 2"):
+        read_table("jsonl-file", path)
+
+
+@pytest.mark.parametrize("line", ["[1, 2]", '"text"', "42"])
+def test_a_jsonl_line_that_is_not_an_object_is_refused(line):
+    with pytest.raises(ValueError, match="line 2 is not a JSON object"):
+        read_jsonl_stream(io.StringIO('{"a": 1}\n' + line + "\n"))
+
 
 FEATURES = {"pump_type": "A", "vibration_mm_s": 3.0, "pressure_bar": 6.0, "filter_ok": 1}
  

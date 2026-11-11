@@ -6,8 +6,9 @@ installation can still list the available adapter names.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -19,23 +20,50 @@ def _read_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig")  # sniffs "," or ";", strips a BOM
 
 
-def _read_jsonl(path: Path) -> pd.DataFrame:
+def read_jsonl_stream(stream: Iterable[str], name: str = "<stream>") -> pd.DataFrame:
+    """Read JSON Lines (one JSON object per line) from any text stream: a file, ``sys.stdin`` or a socket file.
+
+    The stream is consumed line by line, so a sensor feed does not have to be a file on disk. Nothing is
+    corrected silently: a line that is not a JSON object is refused with its line number, and values keep
+    their JSON type (the text "1" stays text). Blank lines and a leading byte-order mark are ignored, and nested
+    objects are flattened into `parent_child` columns, because sensors often send grouped readings.
+    """
+    records = []
+    for number, line in enumerate(stream, start=1):
+        line = line.lstrip("\ufeff").strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError as exc:
+            raise ValueError(f"{name}: line {number} is not valid JSON ({exc.msg})") from None
+        if not isinstance(record, dict):
+            raise ValueError(f"{name}: line {number} is not a JSON object")
+        records.append(record)
+    return _to_table(records)
+
+
+def _to_table(records: list[dict]) -> pd.DataFrame:
     import pandas as pd
 
-    return pd.read_json(path, lines=True, convert_dates=False)
+    if any(isinstance(value, dict) for record in records for value in record.values()):
+        return pd.json_normalize(records, sep="_") 
+    return pd.DataFrame(records)
+
+
+def _read_jsonl(path: Path) -> pd.DataFrame:
+    with open(path, encoding="utf-8") as handle:
+        return read_jsonl_stream(handle, str(path))
+
 
 def _read_json(path: Path) -> pd.DataFrame:
-    import json
-
-    import pandas as pd
-
     with open(path, encoding="utf-8-sig") as handle:
         content = json.load(handle)
     if isinstance(content, dict) and isinstance(content.get("records"), list):
         content = content["records"]
     if not isinstance(content, list) or not all(isinstance(row, dict) for row in content):
         raise ValueError(f"{path}: expected a JSON list of records or an object with a 'records' list")
-    return pd.DataFrame(content)
+    return _to_table(content)
 
 
 def _read_parquet(path: Path) -> pd.DataFrame:
