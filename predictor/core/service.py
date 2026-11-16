@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
+from predictor.core import ranges
 from predictor.core.certainty import SupportIndex, certainty
 from predictor.core.join_info import describe_joins
 from predictor.core.manifest import Manifest, ManifestError
@@ -202,6 +203,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure)
         self._monitor(uc, started, predicted=len(rows), rejected=0,
                       warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
         return {
@@ -257,6 +259,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
                                                        _scenario_descriptors(uc))["levers"] if l["name"] == lever)
@@ -318,6 +321,20 @@ class PredictionService:
                     value, warning = self._bounded(om.descriptor, float(output.values[i]))
                     results[i][target] = {"value": round(value, 6), **({"warning": warning} if warning else {})}
         return results
+
+    @staticmethod
+    def _add_ranges(uc: UseCase, outputs: list[dict[str, Any]], sure: list[dict[str, Any] | None]) -> None:
+        """Put the 80% range next to every regression value, as wide as the row's certainty asks for."""
+        for om in uc.model.outputs.values():
+            spec = om.descriptor.get("range")
+            if not spec:
+                continue
+            target = om.descriptor.get("target_name") or om.name
+            for out, c in zip(outputs, sure):
+                level = (c.get("by_output", {}).get(om.name) or c)["level"] if c else None
+                around = ranges.around(spec, out[target]["value"], level, om.descriptor.get("target_bounds"))
+                if around:
+                    out[target]["range"] = around
 
     @staticmethod
     def _bounded(descriptor: dict[str, Any], value: float) -> tuple[float, str | None]:
@@ -425,6 +442,8 @@ class PredictionService:
         matrix = uc.validator.to_matrix([c.features for c in checked])
         several = len(uc.model.outputs) > 1
         results: list[dict[str, Any]] = [{"record_id": c.record_id} for c in checked]
+        # Certainty level per output and row (where the model has a map of its training data): sets the range's width.
+        levels = {name: [certainty(n)["level"] for n in index.comparable(matrix)] for name, index in (uc.supports or {}).items()}
         for om in uc.model.outputs.values():
             output = om.runner.predict(matrix)
             task = om.descriptor["task_type"]
@@ -433,6 +452,10 @@ class PredictionService:
                 if task == "regression":
                     value, warning = self._bounded(om.descriptor, float(output.values[i]))
                     part["prediction"] = round(value, 6)
+                    around = ranges.around(om.descriptor.get("range"), value, levels[om.name][i] if om.name in levels else None,
+                                           om.descriptor.get("target_bounds"))
+                    if around:
+                        part["range"] = around
                     if warning:
                         c.warnings.append(f"{om.name}: {warning}" if several else warning)
                 elif task == "classification":

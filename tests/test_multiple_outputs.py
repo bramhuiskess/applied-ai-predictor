@@ -408,7 +408,7 @@ def test_an_alias_answers_with_the_flat_single_output_shape_and_the_same_numbers
     client = served["client"]
     multi, _ = predict_item(client)
     linear, body = predict_item(client, "multi-linear")
-    assert set(linear) == {"record_id", "prediction", "warnings"} and body["use_case_id"] == "multi-linear"
+    assert set(linear) == {"record_id", "prediction", "range", "warnings"} and body["use_case_id"] == "multi-linear"
     assert linear["prediction"] == multi["outputs"]["y_linear"]["prediction"]
     flag, _ = predict_item(client, "multi-flag")
     assert flag["prediction"] == multi["outputs"]["y_flag"]["prediction"] and "probabilities" in flag and "outputs" not in flag

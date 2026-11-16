@@ -49,7 +49,7 @@ python scripts/make_tomato_season.py                              # harvest mont
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 387 tests, ~2.5 min, fully offline
+pytest                            # 405 tests, ~2.5 min, fully offline
 ```
 
 ### Technical notebook

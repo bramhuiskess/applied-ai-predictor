@@ -17,7 +17,8 @@ from sklearn.base import clone
 
 from predictor.adapters.fs_registry import FilesystemRegistry, PublishedOutput
 from predictor.adapters.sources import adapter_for, read_table
-from predictor.core.certainty import build_support
+from predictor.core import ranges
+from predictor.core.certainty import SupportIndex, build_support, certainty
 from predictor.core.manifest import ALGORITHMS, MANIFEST_FILENAME, Manifest, TrainingConfig, load_manifest
 from predictor.trainer import models
 from predictor.trainer.export import check_parity, make_thresholds_float32_safe, to_onnx
@@ -130,16 +131,22 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     best_name, best_val = None, None
     excluded: dict[str, list[str]] = {}
     for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone, allowed).items():
+        unseen = None   # (rows, true values, predictions) the candidate did not learn from: calibrates the range
         if fit_groups is not None:
-            val_metrics = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds)
+            val_metrics, out_of_fold = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds, True)
+            unseen = (X_fit, y_fit, out_of_fold)
         else:
             pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
             make_thresholds_float32_safe(pipeline)
             val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds)
+            if task == "regression":
+                unseen = (X_val, y_val, _bounded(pipeline.predict(X_val.to_numpy(dtype="float32")), bounds))
+        candidate = pipeline
         final = clone(pipeline).fit(X_fit.to_numpy(dtype="float32"), y_fit)
         make_thresholds_float32_safe(final)
         test_metrics = models.evaluate(task, final, X_test, y_test, label_test, bounds)
-        results[name] = {"model": final, "validation": val_metrics, "test": test_metrics}
+        results[name] = {"model": final, "validation": val_metrics, "test": test_metrics, "unseen": unseen,
+                         "pipeline": candidate}
         violations = models.effect_violations(final, feature_names, monotone)
         if violations:
             # A scenario model must respect what the manifest declares, so it cannot win.
@@ -232,6 +239,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     # Map of the training data for "comparable cases" in scenarios. Only where it is needed
     # (a scenario section) and allowed (it holds transformed training rows: no personal data by default).
     support_file: dict[str, str] = {}
+    support = None
     if manifest.scenario is not None:
         if manifest.policy.evaluation_rows_allowed:
             support = build_support(X_published.to_numpy(dtype="float64"), [f.kind for f in data.features], feature_names,
@@ -242,6 +250,15 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         else:
             descriptor["certainty"] = {"available": False,
                                        "reason": "not stored for use cases with personal data"}
+    if task == "regression" and fit_groups is None and len(X_fit) >= 100:
+        # One validation period says little about how much periods differ (a good or a bad weather year). So the
+        # range is measured on five held-out parts of the training data: consecutive periods for data in time order.
+        part = (np.arange(len(X_fit)) * 5 // len(X_fit) if data.chronological
+                else np.random.default_rng(models.SEED).permutation(len(X_fit)) % 5)
+        _, out_of_fold = _group_cross_validation(task, chosen["pipeline"], X_fit, y_fit, pd.Series(part), bounds, True)
+        chosen["unseen"] = (X_fit, y_fit, out_of_fold)
+    if task == "regression" and chosen["unseen"] is not None:
+        descriptor["range"] = _range(chosen, support, X_test, y_test, bounds, test_in_support=bool(cfg.test_blocks))
 
     artifact = to_onnx(published, len(feature_names), task)
     parity = check_parity(published, artifact, X_test, descriptor)
@@ -440,6 +457,7 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
            else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
         *_new_group_lines(d),
+        *_range_lines(d),
         "",
         *_joins_section(d.get("joins")),
         "## Candidates (test split)",
@@ -487,6 +505,17 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
 
 
 
+def _range_lines(d: dict[str, Any]) -> list[str]:
+    r = d.get("range")
+    if not r:
+        return []
+    unit = f" {d['target_unit']}" if d.get("target_unit") else ""
+    widths = (", ".join(f"{name} certainty ±{w:.4g}" for name, w in r["by_certainty"].items()) if r.get("by_certainty")
+              else f"±{r['half_width']:.4g}")
+    return [f"- {r['level']:.0%} range around a prediction: {widths}{unit} (measured on {r['calibration_rows']} rows the model "
+            f"did not learn from); on the test rows **{r['test_coverage']:.0%}** fell inside"]
+
+
 def _new_group_lines(d: dict[str, Any]) -> list[str]:
     """Two honest numbers: a site with its own history (the test) and a site the model never saw."""
     new = d.get("new_group")
@@ -499,16 +528,57 @@ def _new_group_lines(d: dict[str, Any]) -> list[str]:
 
 
 def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, groups: pd.Series,
-                            bounds: tuple | None) -> dict[str, float]:
-    """Average metrics over folds that each leave one group (greenhouse, farm) out."""
+                            bounds: tuple | None, with_predictions: bool = False):
+    """Average metrics over folds that each leave one group (greenhouse, farm) out.
+
+    With `with_predictions` also the prediction for every row from the model that did not see its group.
+    """
     folds = []
+    out_of_fold = np.full(len(X), np.nan)
     for group in groups.unique():
         held = (groups == group).to_numpy()
         model = clone(pipeline).fit(X[~held].to_numpy(dtype="float32"), y[~held])
         folds.append(models.evaluate(task, model, X[held], y[held], None, bounds))
+        if with_predictions and task == "regression":
+            out_of_fold[held] = _bounded(model.predict(X[held].to_numpy(dtype="float32")), bounds)
     metrics = {k: float(np.mean([f[k] for f in folds])) for k in folds[0]}
     metrics.update({f"{k}_se": float(np.std([f[k] for f in folds], ddof=1) / np.sqrt(len(folds))) for k in folds[0]})
-    return metrics
+    return (metrics, out_of_fold if task == "regression" else None) if with_predictions else metrics
+
+
+def _bounded(values: np.ndarray, bounds: tuple | None) -> np.ndarray:
+    if not bounds:
+        return np.asarray(values, dtype=float)
+    return np.clip(values, bounds[0] if bounds[0] is not None else -np.inf, bounds[1] if bounds[1] is not None else np.inf)
+
+
+def _range(chosen: dict[str, Any], support: dict[str, Any] | None, X_test: pd.DataFrame, y_test: pd.Series,
+           bounds: tuple | None, test_in_support: bool) -> dict[str, Any] | None:
+    """Calibrate the 80% range on rows the chosen model did not learn from, then check it on the test rows."""
+    X_unseen, y_unseen, predicted = chosen["unseen"]
+    errors = np.abs(np.asarray(y_unseen, dtype=float) - predicted)
+    index = SupportIndex(support) if support else None
+
+    def levels(X: pd.DataFrame, own_rows: bool) -> list[str] | None:
+        if index is None:
+            return None
+        # A row that is itself in the map must not count as its own comparable case.
+        own = 1 if own_rows and index.scale == 1.0 else 0
+        return [certainty(max(c - own, 0))["level"] for c in index.comparable(X.to_numpy(dtype="float64"))]
+
+    spec = ranges.build(errors.tolist(), levels(X_unseen, own_rows=True))
+    if spec is None:
+        return None
+    test_errors = np.abs(np.asarray(y_test, dtype=float) - _bounded(chosen["model"].predict(X_test.to_numpy(dtype="float32")), bounds))
+    test_levels = levels(X_test, own_rows=test_in_support)
+    widths = np.array([ranges.half_width(spec, lv) for lv in (test_levels or [None] * len(test_errors))])
+    spec["test_coverage"] = round(float(np.mean(test_errors <= widths)), 4)
+    if test_levels and "by_certainty" in spec:
+        spec["test_coverage_by_certainty"] = {
+            name: {"rows": int(sum(lv == name for lv in test_levels)),
+                   "coverage": round(float(np.mean(test_errors[[lv == name for lv in test_levels]] <= ranges.half_width(spec, name))), 4)}
+            for name in ("low", "medium", "high") if any(lv == name for lv in test_levels)}
+    return spec
 
 
 def _joins_section(joins: list[dict[str, Any]] | None) -> list[str]:
