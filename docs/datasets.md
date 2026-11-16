@@ -302,6 +302,54 @@ planted in December, about 5.5 months). Beyond that, for example a summer or a 1
 knowledge that speaks, not measured data. CO₂, humidity, diseases and fruit quality are not in it. The
 euro value uses an assumed 2.50 €/kg. A grower's own harvest records would replace the calibration.
 
+### The final test: another year, nothing tuned on it
+
+Every number above comes from data we looked at while building. So we kept one test for the end: the
+[4th Autonomous Greenhouse Challenge](https://doi.org/10.4121/fa102772-32db-4b30-bace-12f2016722ce)
+(2024, CC BY 4.0): six compartments, dwarf tomato, September to November 2024. Other year, other teams,
+other crop, other lamps. `python scripts/final_test.py` puts it in the same columns and sends every
+greenhouse-day through the real API. How to map it (crop, pipe circuits, dimmable lamps) was written down
+in the script before the first run. The models have no history of these greenhouses, so this is the hard
+case: a new greenhouse in a new year.
+
+Run once, on 16 November 2026, published models `greenhouse-heating` v13 and `greenhouse-electricity` v12:
+
+| Heating (448 greenhouse-days, median over 6) | per day | per week | season total | days inside the 80% range |
+|---|---|---|---|---|
+| model | 0.47 MJ/m², R² 0.21 | ±62% | 60% off | 86% |
+| plain guess: the same as a week ago | 0.48 MJ/m² | ±57% | 23% off | |
+| plain guess: the average day of the training data | 1.37 MJ/m² | ±249% | 257% off | |
+
+| Lamp electricity | per day | per week | season total | days inside the 80% range |
+|---|---|---|---|---|
+| model | 0.40 kWh/m², R² −2.85 | ±64% | 63% off | **16%** |
+| plain guess: the same as a week ago | 0.13 kWh/m² | ±12% | 9% off | |
+
+**The models did not pass.** What the test shows:
+
+- **Heating is no better than "the same as a week ago"** for a new greenhouse in a new year, and over the
+  season it is worse (60% against 23%). Two compartments that hardly heated are predicted 3 to 6 times too
+  high. This confirms, more sharply, what the leave-one-greenhouse-out numbers already said: without the
+  greenhouse's own history the heating model should not be relied on.
+- **Electricity is 56-83% too high in every compartment**, a systematic error. These greenhouses have
+  62.5 W/m² LED lamps; the training data has only 117 and 142 W/m². Electricity is lamp hours times lamp
+  power, but a model that saw two lamp powers cannot learn a multiplication, and its tree half cannot go
+  below the lowest power it saw. The R² of 0.98 on the earlier editions hid this, because every test there
+  had a lamp power the model knew.
+- **The system did say so**: every one of these electricity predictions carried the warning that an input
+  was outside the training range. But the 80% range did not widen for it (16% inside). A range measured on
+  the training greenhouses says nothing about a situation the training data does not contain.
+
+What follows from it (not done in this change, so the record stays clean):
+
+1. Give electricity the physics as an input (installed lamp energy = hours × power) instead of hoping the
+   model finds the multiplication.
+2. Do not show a range, or show a much wider one, when an input is outside the training range.
+3. Offer the heating model only for greenhouses with their own history; say so in the response for others.
+
+After such fixes this test is no longer untouched for these two models: a second run would be a check, not
+a final test. The harvest models (`greenhouse-harvest-timing`, `tomato-season`) are not covered by it.
+
 ## 5. Improvements to the pipeline found while doing this
 
 | Problem found | Fix | Effect |
