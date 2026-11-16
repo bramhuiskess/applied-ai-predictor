@@ -260,10 +260,22 @@ def tidy(df: pd.DataFrame) -> pd.DataFrame:
     return df[first + [c for c in df.columns if c not in first]].sort_values(["date", "greenhouse"]).reset_index(drop=True)
 
 
+def add_week_ago(df: pd.DataFrame) -> pd.DataFrame:
+    """A plain guess to measure the models against: the same greenhouse, the same weekday, one week earlier.
+
+    Only a yardstick (`baseline.use_as_input: false` in the manifests): a scenario or a forecast months ahead
+    cannot know last week's use. Empty for a greenhouse's first week and after a gap in the log.
+    """
+    earlier = df[["greenhouse", "date", "heat_mj_m2", "electricity_kwh_m2"]].copy()
+    earlier["date"] = (pd.to_datetime(earlier["date"]) + pd.Timedelta(days=7)).dt.strftime("%Y-%m-%d")
+    earlier = earlier.rename(columns={"heat_mj_m2": "heat_week_ago_mj_m2", "electricity_kwh_m2": "electricity_week_ago_kwh_m2"})
+    return df.merge(earlier, on=["greenhouse", "date"], how="left")
+
+
 def build(extracted: Path, extracted_2018: Path | None) -> tuple[pd.DataFrame, dict]:
     second, info = build_second(extracted)
     frames = [build_first(extracted_2018), second] if extracted_2018 else [second]
-    return tidy(pd.concat(frames, ignore_index=True)), info
+    return add_week_ago(tidy(pd.concat(frames, ignore_index=True))), info
 
 
 def main() -> None:

@@ -40,7 +40,7 @@ class PreparedData:
     chronological: bool
     notes: list[str] = field(default_factory=list)
     times: pd.Series | None = None  # time each target value refers to (for charts)
-    groups: pd.Series | None = None  # test_group column, for holding out whole groups
+    groups: pd.Series | None = None  # test_group / test_blocks.group column, for holding out whole groups
 
 
 SharedFeatures = tuple[list[FeatureSpec], list[str]]  # (feature specs, notes about dropped columns)
@@ -88,7 +88,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy, shared: Share
         )
 
     baseline_column = cfg.baseline.column if cfg.baseline else None
-    group_column = cfg.test_group.column if cfg.test_group else None
+    group_column = (cfg.test_group.column if cfg.test_group
+                    else cfg.test_blocks.group if cfg.test_blocks else None)
     missing = [c for c in [*cfg.drop_columns, cfg.target, cfg.time_column, cfg.evaluation_label, baseline_column,
                            group_column]
                if c and c not in df.columns]
@@ -137,7 +138,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy, shared: Share
             if baseline_column:
                 if not pd.api.types.is_numeric_dtype(df[baseline_column]):
                     raise TrainingError(f"baseline column {baseline_column!r} must be numeric")
-                persistence = df[baseline_column]  # the simple guess; it may also stay a feature
+                # the simple guess; it stays a feature unless the manifest says it is only the yardstick
+                persistence = df[baseline_column] if cfg.baseline.use_as_input else df.pop(baseline_column)
         keep = y_raw.notna()
         if not keep.all():
             notes.append(f"dropped {int((~keep).sum())} rows without a target value")
