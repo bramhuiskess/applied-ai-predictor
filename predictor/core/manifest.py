@@ -36,6 +36,9 @@ class Baseline(_Strict):
 
     column: str
     label: str
+    # False: the column is only the yardstick, not an input (e.g. "the same as a week ago": a scenario or a
+    # forecast months ahead cannot know it).
+    use_as_input: bool = True
 
 
 class TestGroup(_Strict):
@@ -43,6 +46,20 @@ class TestGroup(_Strict):
 
     column: str
     values: list[str] = Field(min_length=1)
+
+
+class TestBlocks(_Strict):
+    """Hold out whole blocks of time, spread over the data: does it work for a site the model knows, on weeks it has not seen?
+
+    Every `every`-th block of `days` days is the test set (the same calendar blocks for every site). This is the
+    situation of a grower with his own history. `test_group` asks the harder question, a site without any history;
+    name the site column in `group` to get that score as well (the column is then not an input).
+    The published model is refitted on all rows: the held-out blocks only measure.
+    """
+
+    days: int = Field(default=14, ge=1)
+    every: int = Field(default=5, ge=2)
+    group: str | None = None
 
 
 # The models a use case may be trained with, per task. A plain table so `core` needs no ML library; a test
@@ -99,6 +116,7 @@ class TrainingConfig(_Strict):
     test_from: date | None = None
     baseline: Baseline | None = None
     test_group: TestGroup | None = None
+    test_blocks: TestBlocks | None = None
     # Physical limits of the target (gas use cannot be negative). Predictions are kept within them.
     target_min: float | None = None
     target_max: float | None = None
@@ -125,8 +143,12 @@ class TrainingConfig(_Strict):
             raise ValueError("'target_min'/'target_max' only apply to regression")
         if self.target_min is not None and self.target_max is not None and self.target_min >= self.target_max:
             raise ValueError("'target_min' must be smaller than 'target_max'")
-        if self.test_group and self.test_from:
-            raise ValueError("use either 'test_from' or 'test_group' to choose the test set, not both")
+        if sum(x is not None for x in (self.test_group, self.test_from, self.test_blocks)) > 1:
+            raise ValueError("use one of 'test_from', 'test_group' or 'test_blocks' to choose the test set, not several")
+        if self.test_blocks and not self.time_column:
+            raise ValueError("'test_blocks' needs a 'time_column' to place the blocks")
+        if self.test_blocks and self.horizon_steps:
+            raise ValueError("'test_blocks' cannot be combined with 'horizon_steps'")
         if self.test_from and not self.time_column:
             raise ValueError("'test_from' needs a 'time_column' to know which records come after it")
         return self
@@ -154,6 +176,8 @@ class TrainingConfig(_Strict):
                 raise ValueError(f"outputs.{name}.baseline: {config.baseline.column!r} is an output, not an input")
         if self.test_group and self.test_group.column in self.outputs:
             raise ValueError(f"test_group: {self.test_group.column!r} is an output, not an input")
+        if self.test_blocks and self.test_blocks.group in self.outputs:
+            raise ValueError(f"test_blocks: {self.test_blocks.group!r} is an output, not an input")
 
     def output_configs(self) -> dict[str, OutputConfig]:
         """What the use case predicts, name -> config; the same for `target` and for `outputs`."""

@@ -312,9 +312,14 @@ an unknown category, or NaN/Infinity.
                                                 // {"column": "greenhouse", "values": ["Reference 2020"]};
                                                 // the model is then chosen by leaving each other group out
                                                 // in turn, and the simplest one within 1 standard error wins
+    "test_blocks": null,                        // or hold out blocks of time in every group ("my own site, weeks it
+                                                // has not seen"): {"days": 14, "every": 5, "group": "greenhouse"}.
+                                                // `group` (optional, not an input) adds the score for a group the
+                                                // model never saw; the published model is refitted on all rows
     "target_min": null, "target_max": null,     // physical limits of the output (gas >= 0); predictions stay within
     "baseline": null,                           // a column that is a simple guess for the target, e.g.
-                                                // {"column": "yield_5y_avg", "label": "same as the last 5 years"}
+                                                // {"column": "yield_5y_avg", "label": "same as the last 5 years"};
+                                                // add "use_as_input": false when it is only the yardstick
     "drop_columns": ["department_id"],
     "rename_columns": {},
     "evaluation_label": null,                   // anomaly only: a label used just for scoring

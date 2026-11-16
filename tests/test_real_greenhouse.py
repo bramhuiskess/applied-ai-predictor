@@ -130,7 +130,7 @@ def test_the_test_set_is_the_unseen_greenhouse(tmp_path):
 def test_test_group_and_test_from_cannot_be_combined(tmp_path):
     m = base_manifest(tmp_path / "days.csv", test_group={"column": "greenhouse", "values": ["B"]},
                       test_from="2020-03-01")
-    with pytest.raises(ManifestError, match="not both"):
+    with pytest.raises(ManifestError, match="not several"):
         load_manifest(write(tmp_path, m) / "manifest.json")
 
 
@@ -244,3 +244,82 @@ def test_harvest_timing_uses_a_fixed_window_after_flowering(tmp_path):
     assert row["flowering_date"] == "2019-12-16" and row["days_to_harvest"] == 50
     assert row["air_temp_c"] == pytest.approx(20.0)          # days 40-50 are not in the window
     assert row["light_mol_m2_day"] == pytest.approx(200 * 300 * 288 / 1e6)
+
+
+# --------------------------------------------------------------------------- own history: held-out blocks of time
+
+def blocks_manifest(path, **training):
+    m = base_manifest(path, test_blocks={"days": 14, "every": 5, "group": "greenhouse"}, **training)
+    return m
+
+
+def test_blocks_hold_out_the_same_weeks_of_every_greenhouse(tmp_path):
+    greenhouses(tmp_path / "days.csv")
+    result = train_use_case(write(tmp_path, blocks_manifest(tmp_path / "days.csv")),
+                            bootstrap.build_registry(tmp_path / "models"))
+    split = result["split"]
+    # 120 days per greenhouse = blocks 0..8; blocks 4 (14 days) are the test set, for all 4 greenhouses
+    assert split["test"] == 4 * 14 and split["train"] + split["validation"] == 480 - 56
+    assert split["validation_method"] == "leave one set of 14-day blocks out (4 folds)"
+    assert split["published_on"] == "all rows"
+    assert "greenhouse" not in result["features"]
+    report = Path(result["report"]).read_text()
+    assert "test on held-out blocks: every 5th block of 14 days" in report and "retrained on all rows" in report
+
+
+def test_blocks_also_report_the_score_for_a_new_greenhouse(tmp_path):
+    greenhouses(tmp_path / "days.csv")
+    result = train_use_case(write(tmp_path, blocks_manifest(tmp_path / "days.csv")),
+                            bootstrap.build_registry(tmp_path / "models"))
+    new = result["new_group"]
+    assert new["column"] == "greenhouse" and new["groups"] == 4 and new["metrics"]["mae"] > 0
+    # the greenhouses differ in insulation, so one the model never saw is harder than a known one
+    assert new["metrics"]["mae"] > result["metrics"]["mae"]
+    assert "the model has never seen (each of 4 left out in turn)" in Path(result["report"]).read_text()
+
+
+def test_the_published_model_has_learned_from_the_held_out_blocks_too(tmp_path):
+    greenhouses(tmp_path / "days.csv")
+    result = train_use_case(write(tmp_path, blocks_manifest(tmp_path / "days.csv")),
+                            bootstrap.build_registry(tmp_path / "models"))
+    assert result["certainty"]["training_rows"] == 480      # the map of comparable cases covers every row
+
+
+@pytest.mark.parametrize("training, message", [
+    ({"test_blocks": {"days": 14, "every": 5}, "test_from": "2020-03-01"}, "not several"),
+    ({"test_blocks": {"days": 14, "every": 5}, "time_column": None}, "needs a 'time_column'"),
+    ({"test_blocks": {"days": 14, "every": 1}}, "greater than or equal to 2"),
+])
+def test_test_blocks_rules(tmp_path, training, message):
+    m = base_manifest(tmp_path / "days.csv", **training)
+    with pytest.raises(ManifestError, match=message):
+        load_manifest(write(tmp_path, m) / "manifest.json")
+
+
+def test_too_little_data_for_blocks_is_a_clear_error(tmp_path):
+    greenhouses(tmp_path / "days.csv", n_per=20)
+    with pytest.raises(TrainingError, match="test_blocks"):
+        train_use_case(write(tmp_path, blocks_manifest(tmp_path / "days.csv")), bootstrap.build_registry(tmp_path / "models"))
+
+
+def test_a_baseline_can_be_only_a_yardstick(tmp_path):
+    greenhouses(tmp_path / "days.csv")
+    df = pd.read_csv(tmp_path / "days.csv")
+    df["heat_week_ago"] = df.groupby("greenhouse")["heat"].shift(7)       # empty in the first week
+    df.to_csv(tmp_path / "days.csv", index=False)
+    m = blocks_manifest(tmp_path / "days.csv", baseline={"column": "heat_week_ago", "label": "the same as a week ago",
+                                                         "use_as_input": False})
+    result = train_use_case(write(tmp_path, m), bootstrap.build_registry(tmp_path / "models"))
+    assert "heat_week_ago" not in result["features"]
+    assert result["reference"]["label"] == "the same as a week ago" and result["reference"]["persistence_mae"] > 0
+    json.dumps(result["evaluation"], allow_nan=False)      # empty guesses must not become NaN in the JSON
+
+
+def test_week_ago_column_is_the_same_greenhouse_seven_days_earlier():
+    df = pd.DataFrame({"greenhouse": ["A"] * 9 + ["B"], "date": [f"2020-01-{d:02d}" for d in range(1, 10)] + ["2020-01-08"],
+                       "heat_mj_m2": [float(i) for i in range(9)] + [50.0], "electricity_kwh_m2": 1.0})
+    out = agc.add_week_ago(df)
+    a = out[out.greenhouse == "A"].set_index("date")
+    assert a.loc["2020-01-08", "heat_week_ago_mj_m2"] == 0.0 and a.loc["2020-01-09", "heat_week_ago_mj_m2"] == 1.0
+    assert a.loc["2020-01-07"].isna()["heat_week_ago_mj_m2"]
+    assert out[out.greenhouse == "B"]["heat_week_ago_mj_m2"].isna().all()   # never another greenhouse's value
