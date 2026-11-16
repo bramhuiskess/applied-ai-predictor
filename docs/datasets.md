@@ -146,15 +146,48 @@ python scripts/make_greenhouse_challenge.py      # -> data/greenhouse_days.csv (
 predictor train greenhouse-heating greenhouse-electricity greenhouse-harvest-timing
 ```
 
-Three use cases, all with scenario levers. Each is tested on the **growers' compartment(s), which the
-model never saw** (`training.test_group`); the model is chosen by leaving each other compartment out in
-turn (group cross-validation):
+Three use cases, all with scenario levers.
 
-| Use case | Question | Result on the growers' greenhouses |
-|---|---|---|
-| `greenhouse-heating` | heating energy per day | 2020: R² 0.57, per week ±21%, **season total −2%**; 2018: R² 0.49, per week ±26%, season total +6% |
-| `greenhouse-electricity` | lamp electricity per day | R² 0.98-1.00, per week ±3-5%, season total −1 to −3% |
-| `greenhouse-harvest-timing` | days from flowering to harvest (tomato) | typical error **2.3 days** (a plain guess: 4.3); **+1 °C = 2.9 days sooner** |
+### How far can a grower rely on it? Two situations, next to a plain guess
+
+A grower uses the model on **his own greenhouse, with his own history**. So heating and electricity are
+tested on 2-week blocks held out of every compartment (`training.test_blocks`): the model knows the
+greenhouse, not those weeks. The harder question, a greenhouse **without any history**, is reported next to it
+(each compartment left out in turn). `python scripts/check_greenhouse.py` predicts every greenhouse-day
+out of sample for both and compares with plain guesses:
+
+| Heating (median over 12 greenhouses) | per day | per week | season total |
+|---|---|---|---|
+| **own history** | 0.42 MJ/m², R² 0.71 | **±14%** (worst greenhouse ±25%) | 3.5% |
+| new greenhouse, no history | 0.68 MJ/m², R² 0.57 | ±32% (worst ±90%) | 16% |
+| plain guess: the same as a week ago | 0.79 MJ/m² | ±30% | 3.6% |
+| plain guess: the average day | 1.20 MJ/m² | ±60% | 44% |
+
+| Lamp electricity | per day | per week | season total |
+|---|---|---|---|
+| **own history** | 0.07 kWh/m², R² 0.98 | **±2%** | 0.7% |
+| new greenhouse, no history | 0.09 kWh/m², R² 0.99 | ±3% | 1.9% |
+| plain guess: the same as a week ago | 0.32 kWh/m² | ±14% | 5.3% |
+
+![Own history, new greenhouse and plain guesses](img/real_greenhouse_own_history.png)
+
+What this says, honestly:
+
+- With its own history the heating model is about **twice as good per week as the plain guess** (±14% against
+  ±30%). The published model reaches R² 0.84 on its held-out blocks, 47% better than "the same as a week ago".
+- For a greenhouse without history, heating is **no better per week than "the same as a week ago"** (±32%
+  against ±30%), and unusual strategies are far off. A new greenhouse should first log a season. (A scenario
+  or a forecast months ahead cannot use last week's value, so there the model is still the only option.)
+- Over a whole season "the same as a week ago" adds up right almost by construction (3.6%); the model with
+  history matches that (3.5%) and, unlike the guess, can answer "what if".
+- Scenario effects of the published heating model, through the real engine: +1 °C costs 0.39 MJ/m² per day
+  (median; physics 0.26-0.52), never the wrong direction, and "no effect" on only 1-2% of days. Lamp heat
+  saving is still too small (0.10 against 0.19-0.38).
+
+`greenhouse-harvest-timing` (138 harvests, one season) keeps the test on the growers' compartment:
+typical error **2.3 days** (a plain guess: 4.3), **+1 °C = 2.9 days sooner**.
+
+The charts below show the earlier models on the growers' compartments as *new* greenhouses.
 
 ![The unseen growers' greenhouses: actual vs. predicted](img/real_greenhouse_unseen.png)
 
@@ -207,6 +240,12 @@ ripening time, and with 115 training harvests they only added noise.
 - **A redundant input broke the ONNX export.** Lamp power and crop always go together (one lamp type per
   season), so the constrained linear fit returned huge coefficients that cancel out; float32 serving
   was off by 3,000. A tiny ridge penalty keeps the solution unique.
+- **Finer time steps did not help.** Training heating per hour instead of per day looked 27% better on one
+  season, but not on two: 3-5% either way, which is noise. The same for day/night inputs and physics-based
+  inputs (temperature gap, guaranteed heat from the minimum pipe temperatures). What did help is the
+  greenhouse's own history: the remaining error is greenhouse-specific and cannot be read from the settings.
+- **Calibrating on the first weeks does not work**: a greenhouse's first 4 weeks (August, or December) say
+  little about the rest of the season. History has to cover the season.
 - **Strategies nobody else used stay hard**: AI teams that ventilated at 30 °C or kept the greenhouse at
   23 °C are 40-90% off over a season. The growers' strategy is predicted within 2-6%.
 
@@ -226,6 +265,8 @@ script can be replaced by them later.
 | Declared effects threw out the best model on real data (one coefficient had the wrong sign) | Linear model fitted with sign constraints; unsupported effects held at 0 and reported | Real heating R² 0.18 → 0.57 on an unseen greenhouse |
 | Validation on the last 20% in time while the test is "an unseen greenhouse" | With `test_group`: choose the model by leaving each training group out | Model choice answers the same question as the test |
 | With few groups the best candidate is often noise, and a tree can show a lever as having no effect | Simplest model within one standard error of the best | Smooth effects (harvest +1 °C: 0 → −2.9 days) |
+| The only test was "a greenhouse the model never saw", while a grower has his own history | `training.test_blocks`: hold out blocks of time in every group, report the new-group score next to it, publish the model on all rows | Heating per week ±32% → ±14% for a known greenhouse; both numbers in every report |
+| A plain guess could only be a column that is also an input | `baseline.use_as_input: false` | "The same as a week ago" as a yardstick without leaking into scenarios |
 | Linear and trees each miss something on small data | New candidate: the blend (average of both) | Wins on arable yield (MAE 4.22 → 4.09) and plants sold (4,142 → 3,894) |
 | pandas 3 stores dates in microseconds; interpolating on nanoseconds silently froze the gas price | Explicit conversion + a test on the 2022 crisis | Caught by our own sanity check |
 

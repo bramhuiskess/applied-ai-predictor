@@ -90,6 +90,15 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         if test_mask.sum() < 10 or (~test_mask).sum() < 50:
             raise TrainingError(f"test_group {cfg.test_group.values} leaves {int((~test_mask).sum())} rows to train on "
                                 f"and {int(test_mask.sum())} to test on")
+    blocks = None
+    if cfg.test_blocks:
+        # The same calendar blocks for every site; every n-th one is the test set.
+        tb = cfg.test_blocks
+        blocks = ((data.times - data.times.min()).dt.days // tb.days).to_numpy()
+        test_mask = blocks % tb.every == tb.every - 1
+        if test_mask.sum() < 10 or (~test_mask).sum() < 50:
+            raise TrainingError(f"test_blocks (every {tb.every}th block of {tb.days} days) leaves "
+                                f"{int((~test_mask).sum())} rows to train on and {int(test_mask.sum())} to test on")
     split = models.make_split(len(data.X), cfg.test_fraction, data.chronological,
                               data.y if task == "classification" else None, test_start, test_mask)
     X_train, X_val, X_test = (data.X.iloc[idx] for idx in (split.train, split.val, split.test))
@@ -106,11 +115,17 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     y_fit = pd.concat([y_train, y_val]) if y_train is not None else None
     # When the test is "a group the model never saw", choose the model on that same question:
     # leave each training group out in turn (group cross-validation) instead of the last 20% in time.
-    fit_groups = None
+    fit_groups, fold_name = None, None
+    fit_index = np.concatenate([split.train, split.val])
     if cfg.test_group and data.y is not None:
-        fit_groups = data.groups.iloc[np.concatenate([split.train, split.val])].reset_index(drop=True)
-        if fit_groups.nunique() < 3:
-            fit_groups = None
+        fit_groups = data.groups.iloc[fit_index].reset_index(drop=True)
+        fold_name = cfg.test_group.column
+    elif blocks is not None and data.y is not None:
+        # The same question as the test: leave whole blocks out in turn.
+        fit_groups = pd.Series(blocks[fit_index] % cfg.test_blocks.every).astype(str)
+        fold_name = f"set of {cfg.test_blocks.days}-day blocks"
+    if fit_groups is not None and fit_groups.nunique() < 3:
+        fit_groups = None
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
     excluded: dict[str, list[str]] = {}
@@ -140,10 +155,22 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
                                                           if n not in excluded}, best_name)
         if simpler != best_name:
             data.notes.append(f"{simpler} is within one standard error of {best_name} in the cross-validation, so "
-                              f"the simpler model is used (smoother effects, less risk on a new {cfg.test_group.column})")
+                              "the simpler model is used (smoother effects, less risk on new situations)")
             best_name = simpler
     chosen = results[best_name]
-    pinned = models.pinned_effects(chosen["model"], feature_names, monotone)
+    # With test_blocks the held-out blocks only measure: the published model learns from every row.
+    new_group = None
+    published, X_published = chosen["model"], X_fit
+    if cfg.test_blocks:
+        pipeline = models.candidates(task, cfg.anomaly_share, monotone, [best_name])[best_name]
+        if data.groups is not None and data.groups.nunique() >= 3:
+            # The harder question next to it: a site the model has never seen (each site left out in turn).
+            new_group = {"column": cfg.test_blocks.group, "groups": int(data.groups.nunique()),
+                         "metrics": _group_cross_validation(task, pipeline, data.X, data.y, data.groups, bounds)}
+        published = clone(pipeline).fit(data.X.to_numpy(dtype="float32"), data.y)
+        make_thresholds_float32_safe(published)
+        X_published = data.X
+    pinned = models.pinned_effects(published, feature_names, monotone)
     if pinned:
         data.notes.append(f"the data shows no effect of {pinned} in the declared direction, so the linear model "
                           "holds it at 0 (more data on those levers would help)")
@@ -178,16 +205,19 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         "metrics": chosen["test"],
         "candidates": {n: {"validation": r["validation"], "test": r["test"]} for n, r in results.items()},
         "reference": reference,
-        "feature_importance": models.feature_importance(chosen["model"], feature_names),
+        "feature_importance": models.feature_importance(published, feature_names),
         "scenario_constraints": ({"effects": {n: ("increasing" if d > 0 else "decreasing")
                                               for n, d in zip(feature_names, monotone) if d},
                                   "excluded_candidates": excluded, "held_at_zero": pinned} if monotone else None),
         "split": {"chronological": data.chronological, "test_from": cfg.test_from.isoformat() if cfg.test_from else None,
                   "test_group": cfg.test_group.model_dump() if cfg.test_group else None,
+                  "test_blocks": cfg.test_blocks.model_dump() if cfg.test_blocks else None,
                   "train": len(split.train), "validation": len(split.val),
                   "test": len(split.test),
-                  "validation_method": (f"leave one {cfg.test_group.column} out ({fit_groups.nunique()} folds)"
+                  "published_on": "all rows" if cfg.test_blocks else "train + validation",
+                  "validation_method": (f"leave one {fold_name} out ({fit_groups.nunique()} folds)"
                                         if fit_groups is not None else "hold-out")},
+        "new_group": new_group,
         "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
                                          split.test, manifest.policy.evaluation_rows_allowed),
         "notes": data.notes,
@@ -204,7 +234,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     support_file: dict[str, str] = {}
     if manifest.scenario is not None:
         if manifest.policy.evaluation_rows_allowed:
-            support = build_support(X_fit.to_numpy(dtype="float64"), [f.kind for f in data.features], feature_names,
+            support = build_support(X_published.to_numpy(dtype="float64"), [f.kind for f in data.features], feature_names,
                                     [f.categories for f in data.features], descriptor["feature_importance"])
             support_file["support.json"] = json.dumps(support)  # stored in this output's own folder
             descriptor["certainty"] = {"available": True, "training_rows": support["rows"],
@@ -213,8 +243,8 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
             descriptor["certainty"] = {"available": False,
                                        "reason": "not stored for use cases with personal data"}
 
-    artifact = to_onnx(chosen["model"], len(feature_names), task)
-    parity = check_parity(chosen["model"], artifact, X_test, descriptor)
+    artifact = to_onnx(published, len(feature_names), task)
+    parity = check_parity(published, artifact, X_test, descriptor)
     descriptor["parity"] = parity
     if not parity["passed"]:
         raise TrainingError(f"ONNX export does not match the original model: {parity}")
@@ -399,14 +429,17 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
         f"- Task: **{d['task_type']}**" + (f", target `{d['target_name']}`" if d.get("target_name") else ""),
         f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on "
         + (f"{d['split']['validation_method']} cross-validation" if d["split"].get("validation_method", "hold-out") != "hold-out"
-           else "the validation split") + ", then retrained on train + validation)",
+           else "the validation split") + f", then retrained on {d['split'].get('published_on', 'train + validation')})",
         f"- Data: {d['dataset']['rows']} rows from `{d['dataset']['path']}`; split train/validation/test = "
         f"{d['split']['train']}/{d['split']['validation']}/{d['split']['test']}"
         + (f" (test on unseen {d['split']['test_group']['column']}: {', '.join(d['split']['test_group']['values'])})"
            if d["split"].get("test_group")
+           else f" (test on held-out blocks: every {d['split']['test_blocks']['every']}th block of "
+                f"{d['split']['test_blocks']['days']} days)" if d["split"].get("test_blocks")
            else f" (backtest: test from {d['split']['test_from']})" if d["split"].get("test_from")
            else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
+        *_new_group_lines(d),
         "",
         *_joins_section(d.get("joins")),
         "## Candidates (test split)",
@@ -452,6 +485,17 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
     return lines
 
 
+
+
+def _new_group_lines(d: dict[str, Any]) -> list[str]:
+    """Two honest numbers: a site with its own history (the test) and a site the model never saw."""
+    new = d.get("new_group")
+    if not new:
+        return []
+    metric = models.PRIMARY_METRIC[d["task_type"]][0]
+    return [f"- With its own history (the test above): {metric} **{d['metrics'][metric]:.4f}**; for a "
+            f"{new['column']} the model has never seen (each of {new['groups']} left out in turn): "
+            f"{metric} **{new['metrics'][metric]:.4f}**"]
 
 
 def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, groups: pd.Series,
@@ -514,7 +558,7 @@ def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_in
         sample["regression"] = {
             "actual": [round(float(v), 4) for v in y_test.iloc[rows]],
             "predicted": [round(float(v), 4) for v in model.predict(X[rows])],
-            "persistence": ([round(float(v), 4) for v in data.persistence.iloc[test_index[rows]]]
+            "persistence": ([None if pd.isna(v) else round(float(v), 4) for v in data.persistence.iloc[test_index[rows]]]
                             if data.persistence is not None else None),
             "time": ([t.isoformat() for t in data.times.iloc[test_index[rows]]]
                      if data.times is not None else None),
