@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.0",
   "use_case_id": "tomato-season",
-  "description": "Tomato harvest in the next 1, 3 and 5 months from the settings so far and the plan from now on. Seasons come from a crop model calibrated and tested on real greenhouses (Autonomous Greenhouse Challenge, WUR: season total 3.7% off on a greenhouse it never saw), run on real KNMI weather of ten years. The weather of the coming months is not an input, so the error is an honest margin for a forecast months ahead. The euro value assumes 2.50 EUR/kg; change value_eur when the real price is known.",
+  "description": "Tomato harvest in the next 1, 3 and 5 months, and the heating and lamp electricity those 5 months cost, from the settings so far and the plan from now on. With the grower's own prices one scenario gives the net result in euros per m². Seasons come from a crop model and a heat balance fitted and tested on real greenhouses (Autonomous Greenhouse Challenge, WUR), run on real KNMI weather of ten years. The weather of the coming months is not an input, so the error is an honest margin for a forecast months ahead. Heating needs the greenhouse's own use of the last four weeks.",
   "data_source": {
     "adapter": "csv-file",
     "path": "data/tomato_season.csv"
@@ -11,7 +11,8 @@
     "test_from": "2023-07-01",
     "drop_columns": [
       "season_id",
-      "planting_date"
+      "planting_date",
+      "greenhouse_seed"
     ],
     "outputs": {
       "harvest_1_month_kg_m2": {
@@ -37,6 +38,22 @@
           "column": "usual_harvest_5_months_kg_m2",
           "label": "a normal plan in an average year"
         }
+      },
+      "heating_5_months_mj_m2": {
+        "unit": "MJ/m²",
+        "target_min": 0,
+        "baseline": {
+          "column": "usual_heating_5_months_mj_m2",
+          "label": "a normal plan in an average year"
+        }
+      },
+      "electricity_5_months_kwh_m2": {
+        "unit": "kWh/m²",
+        "target_min": 0,
+        "baseline": {
+          "column": "usual_electricity_5_months_kwh_m2",
+          "label": "a normal plan in an average year"
+        }
       }
     },
     "units": {
@@ -47,7 +64,13 @@
       "lamp_hours_plan": "h/day",
       "usual_harvest_1_month_kg_m2": "kg/m²",
       "usual_harvest_3_months_kg_m2": "kg/m²",
-      "usual_harvest_5_months_kg_m2": "kg/m²"
+      "usual_harvest_5_months_kg_m2": "kg/m²",
+      "heat_last_4_weeks_mj_m2": "MJ/m²",
+      "tomato_price_eur_kg": "€/kg",
+      "heat_price_eur_mj": "€/MJ",
+      "electricity_price_eur_kwh": "€/kWh",
+      "usual_heating_5_months_mj_m2": "MJ/m²",
+      "usual_electricity_5_months_kwh_m2": "kWh/m²"
     }
   },
   "model": {
@@ -66,7 +89,10 @@
         "unit": "°C",
         "min": 19.5,
         "max": 24.5,
-        "step": 0.5
+        "step": 0.5,
+        "effects": {
+          "heating_5_months_mj_m2": "increasing"
+        }
       },
       "lamp_hours_plan": {
         "label": "Lamp hours on dark days from now on",
@@ -77,7 +103,9 @@
         "effects": {
           "harvest_1_month_kg_m2": "increasing",
           "harvest_3_months_kg_m2": "increasing",
-          "harvest_5_months_kg_m2": "increasing"
+          "harvest_5_months_kg_m2": "increasing",
+          "electricity_5_months_kwh_m2": "increasing",
+          "heating_5_months_mj_m2": "decreasing"
         }
       }
     },
@@ -90,7 +118,17 @@
       },
       "harvest_5_months_kg_m2": {
         "label": "Harvest in the next 5 months",
-        "value_eur": 2.5
+        "price_from": "tomato_price_eur_kg"
+      },
+      "heating_5_months_mj_m2": {
+        "label": "Heating in the next 5 months",
+        "price_from": "heat_price_eur_mj",
+        "is_cost": true
+      },
+      "electricity_5_months_kwh_m2": {
+        "label": "Lamp electricity in the next 5 months",
+        "price_from": "electricity_price_eur_kwh",
+        "is_cost": true
       }
     },
     "case_label": "decisions"

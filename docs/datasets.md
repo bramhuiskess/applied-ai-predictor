@@ -297,6 +297,56 @@ the real engine on test decisions):
 | 1 °C warmer | +1.1% (next month: +4.9%) | +0.7% (next month: +3.6%) | 72% (next month: 84%) |
 | 1 °C colder | −1.2% (next month: −5.1%) | −1.3% (next month: −4.4%) | 87% (next month: 88%) |
 
+#### The net result of a plan, in euros
+
+A grower does not want three numbers, he wants to know what a plan brings in. So every simulated season also
+books what the next 5 months cost, and the use case has five outputs: harvest in 1, 3 and 5 months, heating
+(MJ/m²) and lamp electricity (kWh/m²) in the next 5 months. The grower's own prices are inputs
+(`tomato_price_eur_kg`, `heat_price_eur_mj`, `electricity_price_eur_kwh`), so one scenario answers in money:
+
+> 1 degree warmer: harvest in the next 5 months 1.1% higher (+0.12 kg/m², worth +€0.41); heating 11.1% higher
+> (+23.9 MJ/m², worth −€0.44); lamp electricity worth −€0.05. **Net worth −€0.08 per m².**
+
+- **Heating** comes from a heat balance fitted on the real greenhouses (`scripts/greenhouse_heat.py`): loss
+  through the glass minus sun and lamp heat, plus a base use, **times the greenhouse's own factor**. Growers
+  differ a factor 0.5 to 1.7 at the same temperature, and nothing in the settings predicts that. So the row
+  holds the greenhouse's heating use of the last four weeks. On the real data, each greenhouse left out:
+
+  | heating for the rest of the season | error |
+  |---|---|
+  | heat balance with the greenhouse's own last four weeks | **18%** |
+  | heat balance without history | 46% |
+  | plain guess: it stays like the last four weeks | 53% |
+
+- **Electricity** is lamp hours times the measured 0.131 kWh/m² per lamp hour.
+- **Prices** are drawn per grower and independent of the year, so a model cannot use a price as a hidden label
+  for a weather year. Tomato prices follow the season (the challenge's price table for January-June; July-December
+  is an assumption).
+
+On weather years the model never saw (2023-2025):
+
+| Next 5 months | typical error | plain guess: a normal plan in an average year | better |
+|---|---|---|---|
+| harvest | 0.65 kg/m² (5.3%) | 1.03 | 37% |
+| heating | 53 MJ/m² (20%) | 102 | 48% |
+| lamp electricity | 13 kWh/m² (15%) | 26 | 51% |
+
+And the net result against the answer key (`--check`, per m² over 5 months):
+
+| Scenario from now on | true net change | predicted | right direction |
+|---|---|---|---|
+| 4 lamp hours more | −€0.49 | −€0.43 | 86% |
+| 4 lamp hours less | +€0.42 | +€0.38 | 77% |
+| 1 °C warmer | +€0.03 | +€0.03 | 59% |
+| 1 °C colder | −€0.08 | −€0.03 | 66% |
+
+Read it like this: at these prices extra lamp hours cost more than they bring, and the model sees that. One
+degree of temperature is almost neutral in money (a little more and earlier harvest against more heating), so
+there the sign is close to a coin flip, and the response says the effect is within the margin.
+
+What the money view leaves out: labour, CO₂, plants, depreciation, and that a tomato harvested in January pays
+more than one in May (the price is one average per decision).
+
 Limits, plainly: the crop model stands on one season of one crop (temperatures of 21-23.5 °C on average,
 planted in December, about 5.5 months). Beyond that, for example a summer or a 10-month crop, it is crop
 knowledge that speaks, not measured data. CO₂, humidity, diseases and fruit quality are not in it. The
