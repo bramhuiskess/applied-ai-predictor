@@ -323,6 +323,14 @@ A weather outlook for the season would narrow that; it is not an input today.
 
 Example, nursery gas: ±3,250 m³ with many comparable batches, ±10,700 m³ with few.
 
+**Where the range stops** (added after the final test on greenhouses of another year, see
+[datasets.md](datasets.md)):
+
+- An input clearly outside the training data (more than 10% of the seen span beyond it): `"range": null`
+  plus a `range_note` naming the input. Nobody has measured the model's error there.
+- With `test_blocks.group`, "low certainty" is at least as wide as the error on a whole group the model
+  never saw, and the certainty message says what to expect without history of that group.
+
 ### Not in this ticket
 
 - Per-output retraining and outputs that depend on each other (weeks to harvest driving gas): outputs are

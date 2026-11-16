@@ -173,7 +173,11 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         if data.groups is not None and data.groups.nunique() >= 3:
             # The harder question next to it: a site the model has never seen (each site left out in turn).
             new_group = {"column": cfg.test_blocks.group, "groups": int(data.groups.nunique()),
-                         "metrics": _group_cross_validation(task, pipeline, data.X, data.y, data.groups, bounds)}
+                         "metrics": None}
+            new_group["metrics"], new_predictions = _group_cross_validation(task, pipeline, data.X, data.y, data.groups,
+                                                                            bounds, True)
+            if new_predictions is not None:
+                chosen["new_group_errors"] = np.abs(data.y.to_numpy(dtype=float) - new_predictions).tolist()
         published = clone(pipeline).fit(data.X.to_numpy(dtype="float32"), data.y)
         make_thresholds_float32_safe(published)
         X_published = data.X
@@ -512,8 +516,12 @@ def _range_lines(d: dict[str, Any]) -> list[str]:
     unit = f" {d['target_unit']}" if d.get("target_unit") else ""
     widths = (", ".join(f"{name} certainty ±{w:.4g}" for name, w in r["by_certainty"].items()) if r.get("by_certainty")
               else f"±{r['half_width']:.4g}")
-    return [f"- {r['level']:.0%} range around a prediction: {widths}{unit} (measured on {r['calibration_rows']} rows the model "
-            f"did not learn from); on the test rows **{r['test_coverage']:.0%}** fell inside"]
+    lines = [f"- {r['level']:.0%} range around a prediction: {widths}{unit} (measured on {r['calibration_rows']} rows the model "
+             f"did not learn from); on the test rows **{r['test_coverage']:.0%}** fell inside"]
+    if r.get("new_group_half_width") is not None:
+        lines.append(f"- Low certainty is at least as wide as the error on a {d['new_group']['column']} the model never saw "
+                     f"(±{r['new_group_half_width']:.4g}{unit}); outside the training range of an input no range is given")
+    return lines
 
 
 def _new_group_lines(d: dict[str, Any]) -> list[str]:
@@ -566,7 +574,7 @@ def _range(chosen: dict[str, Any], support: dict[str, Any] | None, X_test: pd.Da
         own = 1 if own_rows and index.scale == 1.0 else 0
         return [certainty(max(c - own, 0))["level"] for c in index.comparable(X.to_numpy(dtype="float64"))]
 
-    spec = ranges.build(errors.tolist(), levels(X_unseen, own_rows=True))
+    spec = ranges.build(errors.tolist(), levels(X_unseen, own_rows=True), new_group_errors=chosen.get("new_group_errors"))
     if spec is None:
         return None
     test_errors = np.abs(np.asarray(y_test, dtype=float) - _bounded(chosen["model"].predict(X_test.to_numpy(dtype="float32")), bounds))

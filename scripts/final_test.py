@@ -92,6 +92,7 @@ def build(folder: Path) -> pd.DataFrame:
         d = d[d["samples"] >= MIN_SAMPLES].drop(columns="samples")
         d["grow_min_c"] = 0.0
         d["lamp_power_w_m2"] = round(full_power_w_m2, 1)
+        d["lamp_kwh_m2"] = d["lamp_hours"] * d["lamp_power_w_m2"] / 1000   # as in the training data
         d = d.join(w, how="inner").reset_index()
         d.insert(1, "greenhouse", f"{team} 2024")
         d.insert(2, "crop", "tomato")

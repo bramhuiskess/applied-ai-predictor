@@ -89,25 +89,45 @@ def test_predictions_and_scenarios_come_with_their_range(kas):
     p = client.post("/models/kas/predict", json={"records": [{"features": features}]}).json()["predictions"][0]
     assert p["range"]["low"] < p["prediction"] < p["range"]["high"] and p["range"]["level"] == 0.8
     body = client.post("/models/kas/scenario", json={"base": {"features": features},
-                                                     "scenarios": [{"name": "never seen", "changes": {"setpoint": 14}}]}).json()
-    base, far = body["base"]["outputs"]["gas"], body["scenarios"][0]["outputs"]["gas"]
-    assert base["range"]["low"] < base["value"] < base["range"]["high"]
-    width = lambda o: o["range"]["high"] - o["range"]["low"]
-    assert width(far) >= width(base) - 1e-6              # few comparable days: at least as wide
+                                                     "scenarios": [{"name": "warmer", "changes": {"setpoint": 22}}]}).json()
+    for out in (body["base"]["outputs"]["gas"], body["scenarios"][0]["outputs"]["gas"]):
+        assert out["range"]["low"] < out["value"] < out["range"]["high"]
     plain = client.post("/models/kas-plain/predict", json={"records": [{"features": features}]}).json()["predictions"][0]
     assert plain["range"]["high"] - plain["range"]["low"] == pytest.approx(2 * results["kas-plain"]["range"]["half_width"], abs=1e-4)
     no = client.post("/models/kas-broken/predict", json={"records": [{"features": features}]}).json()["predictions"][0]
     assert "range" not in no
 
 
-def test_a_range_never_goes_below_the_possible_minimum(kas):
-    client, _ = kas
-    body = client.post("/models/kas/scenario", json={"base": {"features": {"setpoint": 18, "outside": 15}},
-                                                     "scenarios": [{"name": "cold", "changes": {"setpoint": 14}}]}).json()
-    cold = body["scenarios"][0]["outputs"]["gas"]
-    assert cold["value"] < 15 and cold["range"]["low"] == 0      # gas cannot be negative
-
-
 def test_a_level_without_its_own_rows_is_never_narrower_than_a_more_certain_one():
     spec = {"level": 0.8, "half_width": 5.0, "by_certainty": {"medium": 6.0, "high": 4.0}}
     assert ranges.half_width(spec, "low") == 6.0
+
+
+# --------------------------------------------------------------------------- lessons of the final test
+
+def test_low_certainty_is_at_least_the_error_on_a_site_the_model_never_saw():
+    errors, levels = [1.0] * 60 + [2.0] * 60, ["high"] * 60 + ["low"] * 60
+    spec = ranges.build(errors, levels, new_group_errors=[5.0] * 50)
+    assert spec["new_group_half_width"] == 5.0
+    assert spec["by_certainty"]["low"] == 5.0 and spec["by_certainty"]["high"] == 1.0
+    # also without a map of comparable cases the number is kept, for the report
+    assert ranges.build(errors, None, new_group_errors=[5.0] * 50)["new_group_half_width"] == 5.0
+
+
+def test_outside_the_training_data_is_recognised_with_some_slack():
+    properties = {"setpoint": {"x-observed-range": [18.0, 22.0]}, "kind": {"enum": ["a", "b"]}}
+    assert ranges.outside_training(properties, {"setpoint": 22.3, "kind": "a"}) == []          # a near miss (10% slack)
+    assert ranges.outside_training(properties, {"setpoint": 30.0, "kind": "a"}) == ["setpoint"]
+    assert ranges.outside_training(properties, {"setpoint": 12.0, "kind": "a"}) == ["setpoint"]
+    assert "setpoint is outside the data the model was trained on" in ranges.unavailable_note(["setpoint"])
+
+
+def test_no_range_where_the_model_was_never_tested(kas):
+    client, _ = kas
+    far = client.post("/models/kas/predict", json={"records": [{"features": {"setpoint": 20, "outside": 40}}]}).json()["predictions"][0]
+    assert far["range"] is None and "outside is outside the data" in far["range_note"]
+    body = client.post("/models/kas/scenario", json={"base": {"features": {"setpoint": 20, "outside": 7}},
+                                                     "scenarios": [{"name": "far", "changes": {"setpoint": 26}}]}).json()
+    assert "range_note" not in body["base"]["outputs"]["gas"] and body["base"]["outputs"]["gas"]["range"]
+    far = body["scenarios"][0]["outputs"]["gas"]
+    assert far["range"] is None and "setpoint" in far["range_note"]

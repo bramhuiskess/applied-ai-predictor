@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 408 tests, die draaien ook op GitHub Actions
+- 412 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -61,8 +61,9 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
   (seizoenstotaal 3,7% ernaast op een kas die het nooit zag), gedraaid op 10 jaar echt KNMI-weer. Antwoord op
   "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 5,5% ernaast, 35% beter dan een simpele gok
 - **eindtest op een ander jaar** (4e Greenhouse Challenge, 2024, nergens op afgesteld): de stook- en stroommodellen
-  halen het daar niet (zie [`docs/datasets.md`](docs/datasets.md)). Zonder eigen historie van de kas is stoken niet beter
-  dan "zelfde als vorige week", en het stroommodel kent alleen de lampen uit de trainingsdata
+  haalden het daar niet. Daarna gefixt: het stroommodel krijgt lampgebruik (uren × vermogen) en zit nu op 4% per seizoen;
+  het stookmodel zegt bij een kas zonder historie eerlijk dat je er niet op moet varen, en buiten de trainingsdata
+  komt er geen marge meer (zie [`docs/datasets.md`](docs/datasets.md))
 - een kapotte versie van de kwekerijdata (vastgelopen sensor, pieken, verkeerde eenheden) voor later
 
 ```bash

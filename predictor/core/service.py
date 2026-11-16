@@ -203,7 +203,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure)
+        self._add_ranges(uc, outputs, sure, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0,
                       warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
         return {
@@ -236,10 +236,13 @@ class PredictionService:
         matrix = uc.validator.to_matrix(rows)
         label = uc.manifest.scenario.case_label
         per_output = {name: uc.supports[name].comparable(matrix) for name in uc.supports}
+        unknown_site = _unknown_site_note(uc)
         result = []
         for i in range(len(rows)):
             counts = {name: counts[i] for name, counts in per_output.items()}
             weakest = certainty(min(counts.values()), label)
+            if weakest["level"] == "low" and unknown_site:
+                weakest["message"] += unknown_site
             if len(counts) > 1:
                 weakest["by_output"] = {name: {k: v for k, v in certainty(c, label).items() if k != "message"}
                                         for name, c in counts.items()}
@@ -259,7 +262,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure)
+        self._add_ranges(uc, outputs, sure, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
                                                        _scenario_descriptors(uc))["levers"] if l["name"] == lever)
@@ -323,14 +326,23 @@ class PredictionService:
         return results
 
     @staticmethod
-    def _add_ranges(uc: UseCase, outputs: list[dict[str, Any]], sure: list[dict[str, Any] | None]) -> None:
-        """Put the 80% range next to every regression value, as wide as the row's certainty asks for."""
+    def _add_ranges(uc: UseCase, outputs: list[dict[str, Any]], sure: list[dict[str, Any] | None],
+                    rows: list[dict[str, Any]]) -> None:
+        """Put the 80% range next to every regression value, as wide as the row's certainty asks for.
+
+        A row outside the values the model was trained on gets no range: its error there was never measured.
+        """
+        properties = uc.model.feature_schema["properties"]
+        outside = [ranges.outside_training(properties, row) for row in rows]
         for om in uc.model.outputs.values():
             spec = om.descriptor.get("range")
             if not spec:
                 continue
             target = om.descriptor.get("target_name") or om.name
-            for out, c in zip(outputs, sure):
+            for out, c, beyond in zip(outputs, sure, outside):
+                if beyond:
+                    out[target]["range"], out[target]["range_note"] = None, ranges.unavailable_note(beyond)
+                    continue
                 level = (c.get("by_output", {}).get(om.name) or c)["level"] if c else None
                 around = ranges.around(spec, out[target]["value"], level, om.descriptor.get("target_bounds"))
                 if around:
@@ -444,6 +456,8 @@ class PredictionService:
         results: list[dict[str, Any]] = [{"record_id": c.record_id} for c in checked]
         # Certainty level per output and row (where the model has a map of its training data): sets the range's width.
         levels = {name: [certainty(n)["level"] for n in index.comparable(matrix)] for name, index in (uc.supports or {}).items()}
+        properties = uc.model.feature_schema["properties"]
+        outside = [ranges.outside_training(properties, c.features) for c in checked]
         for om in uc.model.outputs.values():
             output = om.runner.predict(matrix)
             task = om.descriptor["task_type"]
@@ -452,10 +466,13 @@ class PredictionService:
                 if task == "regression":
                     value, warning = self._bounded(om.descriptor, float(output.values[i]))
                     part["prediction"] = round(value, 6)
-                    around = ranges.around(om.descriptor.get("range"), value, levels[om.name][i] if om.name in levels else None,
-                                           om.descriptor.get("target_bounds"))
-                    if around:
-                        part["range"] = around
+                    if om.descriptor.get("range") and outside[i]:
+                        part["range"], part["range_note"] = None, ranges.unavailable_note(outside[i])
+                    else:
+                        around = ranges.around(om.descriptor.get("range"), value, levels[om.name][i] if om.name in levels else None,
+                                               om.descriptor.get("target_bounds"))
+                        if around:
+                            part["range"] = around
                     if warning:
                         c.warnings.append(f"{om.name}: {warning}" if several else warning)
                 elif task == "classification":
@@ -577,3 +594,16 @@ def _supports(manifest: Manifest, model: LoadedModel | None) -> dict[str, Suppor
     found = {om.descriptor.get("target_name") or om.name: SupportIndex(om.support)
              for om in model.outputs.values() if om.support}
     return found or None
+
+
+def _unknown_site_note(uc: UseCase) -> str | None:
+    """For low certainty: what to expect if the model has no history of this site (measured on sites left out in training)."""
+    if len(uc.model.outputs) != 1:
+        return None
+    descriptor = next(iter(uc.model.outputs.values())).descriptor
+    width, group = (descriptor.get("range") or {}).get("new_group_half_width"), (descriptor.get("new_group") or {}).get("column")
+    if width is None or not group:
+        return None
+    unit = f" {descriptor['target_unit']}" if descriptor.get("target_unit") else ""
+    return (f" If the model has no history of this {group}, expect it to be off by up to about {width:.2g}{unit}; "
+            f"log a season for this {group} first to rely on it.")

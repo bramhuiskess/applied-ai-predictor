@@ -340,15 +340,36 @@ Run once, on 16 November 2026, published models `greenhouse-heating` v13 and `gr
   was outside the training range. But the 80% range did not widen for it (16% inside). A range measured on
   the training greenhouses says nothing about a situation the training data does not contain.
 
-What follows from it (not done in this change, so the record stays clean):
+**What we changed because of it** (so from here on the 2024 data is a check, not a final test):
 
-1. Give electricity the physics as an input (installed lamp energy = hours × power) instead of hoping the
-   model finds the multiplication.
-2. Do not show a range, or show a much wider one, when an input is outside the training range.
-3. Offer the heating model only for greenhouses with their own history; say so in the response for others.
+1. **Electricity gets the physics.** The model's lamp input is now lamp use, `lamp_kwh_m2` = hours × installed
+   power, and neither hours nor power on their own; as long as it saw raw hours it kept assuming the lamps it
+   knew. It is a straight line by design (`model.algorithms`), because only that carries a proportional
+   relation to lamps the data does not contain.
+2. **No range where nothing was measured.** When an input is clearly outside the training data, the response
+   has `"range": null` and a `range_note` saying which input, instead of a narrow range.
+3. **Low certainty means "maybe a greenhouse I do not know".** Its range is at least as wide as the error
+   measured on whole greenhouses the model never saw, and the message says so: *"If the model has no history
+   of this greenhouse, expect it to be off by up to about 1.1 MJ/m²; log a season for this greenhouse first
+   to rely on it."* On the 2024 data 98% of the heating days were already "low certainty"; now the number
+   and the range agree with that.
 
-After such fixes this test is no longer untouched for these two models: a second run would be a check, not
-a final test. The harvest models (`greenhouse-harvest-timing`, `tomato-season`) are not covered by it.
+The same 2024 data again, as a check:
+
+| | per week | season total | days inside the 80% range |
+|---|---|---|---|
+| electricity, before | ±64% | 63% off | 16% |
+| electricity, after | **±5%** | **4% off** | 100% |
+| electricity, plain guess "the same as a week ago" | ±12% | 9% off | |
+| heating, before and after (the model is unchanged) | ±62% | 60% off | 86% → 91% |
+| heating, plain guess "the same as a week ago" | ±57% | 23% off | |
+
+Electricity now beats the plain guess on greenhouses, a year and lamps it never saw. Heating is not better
+and we did not try to make it look better: giving it lamp use instead of lamp hours made no difference on
+the training greenhouses and was worse on 2024 (110% off), so that change was dropped. For heating the
+honest product is the one above: it tells a grower without history not to rely on it.
+
+The harvest models (`greenhouse-harvest-timing`, `tomato-season`) are not covered by this test.
 
 ## 5. Improvements to the pipeline found while doing this
 

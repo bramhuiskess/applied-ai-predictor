@@ -40,6 +40,7 @@ def test_the_final_test_has_the_columns_of_the_training_data(tmp_path):
     assert row["lamp_hours"] == pytest.approx(3.0)                 # 6 hours at half power = 3 hours at full power
     assert row["lamp_power_w_m2"] == pytest.approx(60.0)           # taken from the electricity log
     assert row["electricity_kwh_m2"] == pytest.approx(0.18)        # 3 h x 60 W/m2
+    assert row["lamp_kwh_m2"] == pytest.approx(0.18)               # what the electricity model gets
     assert row["heat_mj_m2"] == pytest.approx(72 * 0.002)          # the 1e-10 placeholders count as zero
     assert row["radiation_j_cm2"] == pytest.approx(100 * 300 * 288 / 1e4)
     for column in ("heat_setpoint_c", "vent_setpoint_c", "energy_screen_pct", "co2_setpoint_ppm", "outside_temp_c",
