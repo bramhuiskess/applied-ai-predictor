@@ -253,6 +253,55 @@ This script is specific to this dataset (it aggregates the 5-minute logs to days
 Generic aggregation, sensor preparation and joining datasets on time are separate team tickets; the
 script can be replaced by them later.
 
+### Harvest months ahead: a crop model fitted on the real greenhouses (`tomato-season`)
+
+The grower's question is "if I change my settings now, what is my harvest in 5 months?". The real data
+cannot answer that on its own: the six tomato greenhouses ended within 5% of each other, so there is
+almost no "what if" in it. A model trained only on that data predicts the season yield worse than a
+plain guess (12% off against 4%). So the cause and effect comes from crop knowledge, and the real data
+only sets the numbers.
+
+`scripts/tomato_crop.py` is a small crop model (a simplified cohort model, as used in greenhouse research):
+new trusses set in proportion to temperature, a truss ripens after a temperature sum, the day's light
+becomes fruit growth shared by the growing trusses, and a truss cannot grow faster than its sink strength.
+Ripening (705 degree-days above 7.4 °C) is measured on 138 real harvests; two numbers are fitted on the
+harvest curves. Tested by leaving each real greenhouse out in turn:
+
+| | error on a greenhouse it never saw |
+|---|---|
+| season total | **3.7%** |
+| harvest per month | 12% |
+| first harvest | 2.7 days |
+
+![Crop model against the real harvests](img/tomato_crop_model.png)
+
+`scripts/make_tomato_season.py` runs that crop model for 3,655 decisions on real KNMI weather of ten years.
+One row is one decision: a greenhouse some weeks into its season, the settings so far and the plan from now
+on (temperature, lamp hours); the outputs are the harvest in the next 1, 3 and 5 months. The weather of
+those months is not an input, because nobody knows it in advance, so the model's error is an honest margin
+for a forecast months ahead. Tested on weather years it never saw (2023-2025):
+
+| Harvest in the next | typical error | plain guess: a normal plan in an average year | better |
+|---|---|---|---|
+| 1 month | 0.09 kg/m² | 0.23 | 62% |
+| 3 months | 0.36 kg/m² | 0.74 | 51% |
+| 5 months | **0.68 kg/m² (5.5%)** | 1.05 | 35% |
+
+The simulator is also the answer key (`python scripts/make_tomato_season.py --check`, scenarios through
+the real engine on test decisions):
+
+| Scenario from now on | harvest in 5 months: crop model | trained model | right direction |
+|---|---|---|---|
+| 4 lamp hours more | +4.6% | +5.2% | 100% |
+| 4 lamp hours less | −4.5% | −5.5% | 100% |
+| 1 °C warmer | +1.1% (next month: +4.9%) | +0.7% (next month: +3.6%) | 72% (next month: 84%) |
+| 1 °C colder | −1.2% (next month: −5.1%) | −1.3% (next month: −4.4%) | 87% (next month: 88%) |
+
+Limits, plainly: the crop model stands on one season of one crop (temperatures of 21-23.5 °C on average,
+planted in December, about 5.5 months). Beyond that, for example a summer or a 10-month crop, it is crop
+knowledge that speaks, not measured data. CO₂, humidity, diseases and fruit quality are not in it. The
+euro value uses an assumed 2.50 €/kg. A grower's own harvest records would replace the calibration.
+
 ## 5. Improvements to the pipeline found while doing this
 
 | Problem found | Fix | Effect |
@@ -267,6 +316,7 @@ script can be replaced by them later.
 | With few groups the best candidate is often noise, and a tree can show a lever as having no effect | Simplest model within one standard error of the best | Smooth effects (harvest +1 °C: 0 → −2.9 days) |
 | The only test was "a greenhouse the model never saw", while a grower has his own history | `training.test_blocks`: hold out blocks of time in every group, report the new-group score next to it, publish the model on all rows | Heating per week ±32% → ±14% for a known greenhouse; both numbers in every report |
 | A plain guess could only be a column that is also an input | `baseline.use_as_input: false` | "The same as a week ago" as a yardstick without leaking into scenarios |
+| The real data holds no "what if" for yield (greenhouses within 5% of each other) | A crop model fitted and tested on the real greenhouses generates the seasons; the trained model is checked against it | Harvest 5 months ahead: 5.5% off, 35% better than a plain guess, effects match the answer key |
 | Linear and trees each miss something on small data | New candidate: the blend (average of both) | Wins on arable yield (MAE 4.22 → 4.09) and plants sold (4,142 → 3,894) |
 | pandas 3 stores dates in microseconds; interpolating on nanoseconds silently froze the gas price | Explicit conversion + a test on the 2022 crisis | Caught by our own sanity check |
 

@@ -57,11 +57,14 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
   (stoken ±14% per week, twee keer zo goed als "zelfde als vorige week") en voor een kas die het model nooit zag
   (±32%, dus eerst een seizoen data verzamelen). Stroom ±2% per week, oogsttijd ±2,3 dagen
   (1 graad warmer = 2,9 dagen eerder). Zelf nalopen: `python scripts/check_greenhouse.py`
+- **oogst maanden vooruit** (`tomato-season`): een gewasmodel dat is afgesteld en getest op de echte kassen
+  (seizoenstotaal 3,7% ernaast op een kas die het nooit zag), gedraaid op 10 jaar echt KNMI-weer. Antwoord op
+  "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 5,5% ernaast, 35% beter dan een simpele gok
 - een kapotte versie van de kwekerijdata (vastgelopen sensor, pieken, verkeerde eenheden) voor later
 
 ```bash
 pip install -e '.[datasets]' && python scripts/make_greenhouse_challenge.py   # echte kasdata (17 MB download)
-python scripts/make_nursery.py --faults && python scripts/make_arable.py && predictor train
+python scripts/make_nursery.py --faults && python scripts/make_arable.py && python scripts/make_tomato_season.py && predictor train
 python scripts/check_scenarios.py   # klopt het model met het antwoordmodel?
 ```
 
