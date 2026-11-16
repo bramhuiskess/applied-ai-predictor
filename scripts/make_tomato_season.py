@@ -4,6 +4,7 @@
     python scripts/make_tomato_season.py --weather synthetic   # offline
     python scripts/make_tomato_season.py --check               # after `predictor train tomato-season`:
                                                                # do the scenarios match the crop model?
+    python scripts/make_tomato_season.py --check-finder        # does the best-plan finder's advice make money?
 
 The grower's question: "if I change my settings now, what is my harvest in 5 months?" No open dataset
 can answer that from data alone (the real greenhouses ended within 5% of each other), so the seasons
@@ -225,16 +226,72 @@ def check(data: Path, daily: pd.DataFrame, use_case: str = "tomato-season", rows
     }).round(2).reset_index()
 
 
+def check_finder(data: Path, daily: pd.DataFrame, use_case: str = "tomato-season", rows: int = 120,
+                 test_from: str = "2023-07-01") -> pd.DataFrame:
+    """Does following the best-plan finder make money? Its advice against the crop model's true outcome of every plan."""
+    import logging
+    import warnings
+
+    from fastapi.testclient import TestClient
+
+    from predictor import bootstrap
+
+    warnings.filterwarnings("ignore")
+    logging.disable(logging.INFO)
+    client = TestClient(bootstrap.build_app(Path("usecases"), Path("models")))
+    model = client.get(f"/models/{use_case}").json()
+    order = model["feature_schema"]["x-feature-order"]
+    levers = {lever["name"]: lever for lever in model["scenario"]["levers"]}
+    grid = [(t, h) for t in np.arange(levers["temp_plan_c"]["min"], levers["temp_plan_c"]["max"] + 1e-9, levers["temp_plan_c"]["step"])
+            for h in np.arange(levers["lamp_hours_plan"]["min"], levers["lamp_hours_plan"]["max"] + 1e-9, levers["lamp_hours_plan"]["step"])]
+    daily = daily.dropna(subset=["temp_mean_c", "radiation_j_cm2"]).reset_index(drop=True)
+    df = pd.read_csv(data)
+    test = df[(df["decision_date"] >= test_from) & (df["days_since_planting"] > 0)]
+    records = []
+    for _, row in test.sample(min(rows, len(test)), random_state=2).iterrows():
+        def true_net(temp: float, hours: float) -> float:
+            return net_eur(row, counterfactual(row, daily, temp_plan_c=temp - float(row["temp_plan_c"]),
+                                                lamp_hours_plan=hours - float(row["lamp_hours_plan"])))
+        keep = true_net(float(row["temp_plan_c"]), float(row["lamp_hours_plan"]))
+        best_possible = max(true_net(t, h) for t, h in grid) - keep
+        features = {k: float(row[k]) for k in order}
+        record = {"best_possible": best_possible}
+        for name, options in [("advice", {}), ("any_gain", {"min_gain": 0}), ("certain", {"min_certainty": "medium", "min_gain": 0})]:
+            body = client.post(f"/models/{use_case}/scenario/best", json={"base": {"features": features}, **options}).json()
+            plan = body["best"]["plan"] if body.get("best") else None
+            record[name] = true_net(plan["temp_plan_c"], plan["lamp_hours_plan"]) - keep if plan else 0.0
+            record[f"{name}_promised"] = body["best"]["net_eur"] if plan else 0.0
+            record[f"{name}_given"] = plan is not None
+        records.append(record)
+    r = pd.DataFrame(records)
+    summary = {}
+    for name, label in [("advice", "the finder's advice (default)"), ("any_gain", "advising every gain, however small"),
+                        ("certain", "only plans with at least medium certainty")]:
+        given = r[f"{name}_given"]
+        summary[label] = {"advice given %": given.mean() * 100, "promised gain": r[f"{name}_promised"].mean(),
+                          "true gain": r[name].mean(), "share of the best possible %": r[name].sum() / r["best_possible"].sum() * 100,
+                          "made it worse % (of advice given)": (r.loc[given, name] < -0.05).mean() * 100, "worst case": r[name].min()}
+    summary["the best plan in hindsight"] = {"advice given %": 100.0, "promised gain": np.nan, "true gain": r["best_possible"].mean(),
+                                             "share of the best possible %": 100.0, "made it worse % (of advice given)": 0.0,
+                                             "worst case": r["best_possible"].min()}
+    return pd.DataFrame(summary).T.round(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=Path("data/tomato_season.csv"))
     parser.add_argument("--seasons", type=int, default=4000)
     parser.add_argument("--weather", choices=["knmi", "synthetic"], default="knmi")
     parser.add_argument("--check", action="store_true", help="compare the trained model's scenarios with the crop model")
+    parser.add_argument("--check-finder", action="store_true", help="does following the best-plan finder make money?")
     args = parser.parse_args()
     daily = knmi.load_daily(STATION, START, END) if args.weather == "knmi" else knmi.synthetic_daily(START, END)
     if args.check:
         print(check(args.out, daily).to_string(index=False))
+        return
+    if args.check_finder:
+        print("net result per m2 over 5 months, compared with keeping the current plan (EUR):")
+        print(check_finder(args.out, daily).to_string())
         return
     df = generate(daily, args.seasons)
     args.out.parent.mkdir(parents=True, exist_ok=True)

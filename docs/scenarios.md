@@ -331,6 +331,57 @@ Example, nursery gas: ±3,250 m³ with many comparable batches, ±10,700 m³ wit
 - With `test_blocks.group`, "low certainty" is at least as wide as the error on a whole group the model
   never saw, and the certainty message says what to expect without history of that group.
 
+## The best plan: "what should I do?"
+
+A scenario answers "what if I do this?". `POST /models/{id}/scenario/best` answers the grower's real question.
+It lays a grid over the levers (their own range and step, at most 2,000 plans), calculates every plan with the
+same engine as a scenario, and proposes the one with the best result:
+
+```json
+{"base": {"features": {...}}}
+```
+
+```json
+"advice": "Best plan for the highest net result in euros: harvest in the next 5 months 14.9% higher (+1.6 kg/m², worth +€6) ...",
+"best": {"plan": {"temp_plan_c": 22.5, "lamp_hours_plan": 14.0}, "net_eur": 2.1, "outputs": {...}, "certainty": {...}, "summary": "..."},
+"alternatives": [{"plan": {...}, "gain": 1.9, "certainty": "medium"}, ...],
+"searched": {"plans": 209, "trusted": 209, "min_gain": 0.94, "typical_error": 2.35, ...}
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `objective` | the highest net result in euros | or one output: `{"output": "gas_m3", "goal": "lowest"}` |
+| `levers` | all levers | search only these, keep the others as in `base` |
+| `min_gain` | 40% of the model's typical error in the objective's unit | advise only a plan that gains at least this |
+| `min_certainty` | `low` (no limit) | leave out plans with fewer comparable cases |
+| `top` | 5 | how many alternatives to list |
+
+An optimiser pushed against a model walks to wherever the model is most optimistic. So the defaults are set on
+evidence. The tomato simulator knows the true result of every plan, so we can see what following the advice
+really brings (`python scripts/make_tomato_season.py --check-finder`, 120 decisions from weather years the
+model never saw, net result per m² over 5 months compared with keeping the current plan):
+
+| | advice given | promised | **true gain** | share of the best possible | advice that made it worse |
+|---|---|---|---|---|---|
+| the finder (default) | 78% of cases | +€2.61 | **+€2.03** | 70% | 10% |
+| advising every gain, however small | 100% | +€2.73 | +€2.05 | 71% | 16% |
+| only plans with at least medium certainty | 78% | +€1.02 | +€0.59 | 20% | 19% |
+| the best plan in hindsight | | | +€2.88 | 100% | |
+
+What this shows:
+
+- **Following the advice pays**: about 70% of what hindsight would have given.
+- **It promises about a quarter too much** (+€2.61 promised, +€2.03 real). That is the price of choosing the
+  best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper estimate.
+- **Small gains are not worth acting on.** Of the advice that promised less than €1/m², about 4 in 10 made
+  things worse; above €2/m² almost none did. Hence `min_gain`: below it the advice is "keep the current settings".
+- **A limit on certainty did not help here**: it removed two thirds of the gain and the advice that was left
+  was not more reliable. It is available, but off by default. Plans with an input outside the training data
+  are always left out.
+
+This is measured in the simulator, where the true result of every plan is known. For a real greenhouse nobody
+can know what the other 208 plans would have given.
+
 ### Not in this ticket
 
 - Per-output retraining and outputs that depend on each other (weeks to harvest driving gas): outputs are

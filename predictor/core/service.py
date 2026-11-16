@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
+from predictor.core import plan as planning
 from predictor.core import ranges
 from predictor.core.certainty import SupportIndex, certainty
 from predictor.core.join_info import describe_joins
@@ -21,6 +22,7 @@ from predictor.core.scenario import (
     check_scenario,
     compare,
     describe_scenario,
+    margin_of_error,
     resolve_scenarios,
     summarise,
     sweep_values,
@@ -278,6 +280,104 @@ class PredictionService:
                         "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1],
                         "certainty": c}
                        for v, s, out, c in zip(values, resolved.scenarios, outputs[1:], sure[1:])],
+        }
+
+    def best_plan(self, use_case_id: str, base: dict[str, Any], levers: list[str] | None = None,
+                  objective: dict[str, Any] | None = None, min_certainty: str = "low", top: int = 5,
+                  min_gain: float | None = None) -> dict[str, Any]:
+        """Try every setting of the levers and propose the plan with the best result, if it is worth mentioning."""
+        uc = self._scenario_use_case(use_case_id)
+        started = time.perf_counter()
+        scenario, descriptors = uc.manifest.scenario, _scenario_descriptors(uc)
+        levers = levers or list(scenario.levers)
+        problems = [{"scenario": None, "field": name, "message": f"{name!r} cannot be changed in a scenario; you can change: "
+                                                                 f"{', '.join(scenario.levers)}"}
+                    for name in levers if name not in scenario.levers]
+        outputs_known = {om.descriptor.get("target_name") or om.name for om in uc.model.outputs.values()}
+        priced = [name for name, config in scenario.outputs.items() if config.value_eur is not None or config.price_from]
+        if objective is None and not priced:
+            problems.append({"scenario": None, "field": "objective", "message": "no output of this use case has a price, so there "
+                             "is no net result to maximise; give an objective, e.g. {\"output\": \"...\", \"goal\": \"highest\"}"})
+        if objective is not None and objective["output"] not in outputs_known:
+            problems.append({"scenario": None, "field": "objective", "message": f"{objective['output']!r} is not an output; "
+                             f"choose from: {', '.join(sorted(outputs_known))}"})
+        if problems:
+            raise RequestRejected(problems, detail="invalid scenario request")
+
+        plans = planning.grid(scenario, levers)
+        requested = [{"name": f"plan {i + 1}", "changes": {k: {"set": v} for k, v in plan.items()}} for i, plan in enumerate(plans)]
+        resolved = self._resolve(uc, base.get("features"), requested)
+        rows = [resolved.base] + [s.features for s in resolved.scenarios]
+        outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure, rows)
+        self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
+        properties = uc.model.feature_schema["properties"]
+
+        def score(comparison: dict[str, Any]) -> float:
+            if objective is None:
+                return float(comparison["net_eur"] or 0.0)
+            change = comparison["outputs"][objective["output"]].get("change", 0.0)
+            return float(change if objective["goal"] == "highest" else -change)
+
+        candidates, low_certainty, outside = [], 0, 0
+        for plan, s, out, c in zip(plans, resolved.scenarios, outputs[1:], sure[1:]):
+            comparison = compare(scenario, descriptors, resolved.base, outputs[0], s.features, out)
+            beyond = ranges.outside_training(properties, s.features)
+            level = c["level"] if c else None
+            ok = planning.allowed(level, min_certainty) and not beyond
+            low_certainty += not planning.allowed(level, min_certainty)
+            outside += bool(beyond)
+            candidates.append({"plan": plan, "scenario": s, "out": out, "certainty": c, "score": score(comparison),
+                               "comparison": comparison, "ok": ok})
+        candidates.sort(key=lambda item: -item["score"])
+        trusted = [item for item in candidates if item["ok"]]
+
+        def short(item: dict[str, Any]) -> dict[str, Any]:
+            return {"plan": item["plan"], "gain": round(item["score"], 4), "net_eur": item["comparison"]["net_eur"],
+                    "certainty": item["certainty"]["level"] if item["certainty"] else None}
+
+        def full(item: dict[str, Any], name: str) -> dict[str, Any]:
+            s = item["scenario"]
+            return {**self._scenario_result(uc, name, s.changes, s.features, s.warnings, resolved.base, outputs[0],
+                                            item["out"], item["certainty"]),
+                    "plan": item["plan"], "gain": round(item["score"], 4)}
+
+        # A gain must be worth mentioning: at least a share of the model's typical error in the objective's unit.
+        margins = {name: margin_of_error(d) for name, d in _descriptors_by_output(uc).items()}
+        prices = {name: _price(config, resolved.base) for name, config in scenario.outputs.items()}
+        typical = planning.typical_error_of_objective(margins, prices, objective)
+        threshold = min_gain if min_gain is not None else (planning.MIN_GAIN_SHARE * typical if typical else 0.0)
+        top_trusted = trusted[0] if trusted and trusted[0]["score"] > 0 else None
+        best = full(top_trusted, "best plan") if top_trusted and top_trusted["score"] >= threshold else None
+        unlimited = candidates[0] if candidates and candidates[0]["score"] > 0 and not candidates[0]["ok"] else None
+        if best:
+            advice = f"Best plan for {planning.describe_objective(objective)}: " + best["summary"].split(": ", 1)[1]
+        elif top_trusted:
+            advice = (f"Keep the current settings. The best plan found would gain {top_trusted['score']:.2g}, less than the "
+                      f"{threshold:.2g} the model can tell apart from its own error.")
+        elif trusted:
+            advice = f"Keep the current settings: no plan beats them for {planning.describe_objective(objective)}."
+        else:
+            advice = ("The model has too few comparable cases for every plan it tried, so it cannot recommend one. "
+                      "Lower min_certainty to see what it would guess.")
+        return {
+            **self._header(uc),
+            "objective": objective or {"output": "net_eur", "goal": "highest"},
+            "levers": levers,
+            "searched": {"plans": len(plans), "trusted": len(trusted), "left_out_low_certainty": int(low_certainty),
+                         "left_out_outside_training_data": int(outside), "min_certainty": min_certainty,
+                         "min_gain": round(threshold, 4), "typical_error": round(typical, 4) if typical else None},
+            "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
+                     "outputs": outputs[0], "certainty": sure[0]},
+            "best": best,
+            "alternatives": [short(item) for item in trusted[1: 1 + top] if item["score"] >= threshold] if best else [],
+            # Found, but its gain is too small to tell apart from the model's error.
+            "best_below_min_gain": short(top_trusted) if top_trusted and not best else None,
+            # Shown, not recommended: what the model would pick if it ignored how little it knows there.
+            "best_without_limits": ({**short(unlimited), "warning": "not recommended: the model has too few comparable cases "
+                                     "for this plan or it lies outside its training data"} if unlimited else None),
+            "advice": advice,
         }
 
     def _scenario_use_case(self, use_case_id: str) -> UseCase:
@@ -607,3 +707,16 @@ def _unknown_site_note(uc: UseCase) -> str | None:
     unit = f" {descriptor['target_unit']}" if descriptor.get("target_unit") else ""
     return (f" If the model has no history of this {group}, expect it to be off by up to about {width:.2g}{unit}; "
             f"log a season for this {group} first to rely on it.")
+
+
+def _descriptors_by_output(uc: UseCase) -> dict[str, dict[str, Any]]:
+    return {om.descriptor.get("target_name") or om.name: om.descriptor for om in uc.model.outputs.values()}
+
+
+def _price(config: Any, row: dict[str, Any]) -> float | None:
+    """Euros per unit of an output for this request (None when the output has no price)."""
+    if config.value_eur is not None:
+        return float(config.value_eur)
+    if config.price_from and row.get(config.price_from) is not None:
+        return float(row[config.price_from])
+    return None
