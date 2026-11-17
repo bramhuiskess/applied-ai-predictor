@@ -297,10 +297,129 @@ the real engine on test decisions):
 | 1 °C warmer | +1.1% (next month: +4.9%) | +0.7% (next month: +3.6%) | 72% (next month: 84%) |
 | 1 °C colder | −1.2% (next month: −5.1%) | −1.3% (next month: −4.4%) | 87% (next month: 88%) |
 
+#### The net result of a plan, in euros
+
+A grower does not want three numbers, he wants to know what a plan brings in. So every simulated season also
+books what the next 5 months cost, and the use case has five outputs: harvest in 1, 3 and 5 months, heating
+(MJ/m²) and lamp electricity (kWh/m²) in the next 5 months. The grower's own prices are inputs
+(`tomato_price_eur_kg`, `heat_price_eur_mj`, `electricity_price_eur_kwh`), so one scenario answers in money:
+
+> 1 degree warmer: harvest in the next 5 months 1.1% higher (+0.12 kg/m², worth +€0.41); heating 11.1% higher
+> (+23.9 MJ/m², worth −€0.44); lamp electricity worth −€0.05. **Net worth −€0.08 per m².**
+
+- **Heating** comes from a heat balance fitted on the real greenhouses (`scripts/greenhouse_heat.py`): loss
+  through the glass minus sun and lamp heat, plus a base use, **times the greenhouse's own factor**. Growers
+  differ a factor 0.5 to 1.7 at the same temperature, and nothing in the settings predicts that. So the row
+  holds the greenhouse's heating use of the last four weeks. On the real data, each greenhouse left out:
+
+  | heating for the rest of the season | error |
+  |---|---|
+  | heat balance with the greenhouse's own last four weeks | **18%** |
+  | heat balance without history | 46% |
+  | plain guess: it stays like the last four weeks | 53% |
+
+- **Electricity** is lamp hours times the measured 0.131 kWh/m² per lamp hour.
+- **Prices** are drawn per grower and independent of the year, so a model cannot use a price as a hidden label
+  for a weather year. Tomato prices follow the season (the challenge's price table for January-June; July-December
+  is an assumption).
+
+On weather years the model never saw (2023-2025):
+
+| Next 5 months | typical error | plain guess: a normal plan in an average year | better |
+|---|---|---|---|
+| harvest | 0.65 kg/m² (5.3%) | 1.03 | 37% |
+| heating | 53 MJ/m² (20%) | 102 | 48% |
+| lamp electricity | 13 kWh/m² (15%) | 26 | 51% |
+
+And the net result against the answer key (`--check`, per m² over 5 months):
+
+| Scenario from now on | true net change | predicted | right direction |
+|---|---|---|---|
+| 4 lamp hours more | −€0.49 | −€0.43 | 86% |
+| 4 lamp hours less | +€0.42 | +€0.38 | 77% |
+| 1 °C warmer | +€0.03 | +€0.03 | 59% |
+| 1 °C colder | −€0.08 | −€0.03 | 66% |
+
+Read it like this: at these prices extra lamp hours cost more than they bring, and the model sees that. One
+degree of temperature is almost neutral in money (a little more and earlier harvest against more heating), so
+there the sign is close to a coin flip, and the response says the effect is within the margin.
+
+What the money view leaves out: labour, CO₂, plants, depreciation, and that a tomato harvested in January pays
+more than one in May (the price is one average per decision).
+
 Limits, plainly: the crop model stands on one season of one crop (temperatures of 21-23.5 °C on average,
 planted in December, about 5.5 months). Beyond that, for example a summer or a 10-month crop, it is crop
 knowledge that speaks, not measured data. CO₂, humidity, diseases and fruit quality are not in it. The
 euro value uses an assumed 2.50 €/kg. A grower's own harvest records would replace the calibration.
+
+### The final test: another year, nothing tuned on it
+
+Every number above comes from data we looked at while building. So we kept one test for the end: the
+[4th Autonomous Greenhouse Challenge](https://doi.org/10.4121/fa102772-32db-4b30-bace-12f2016722ce)
+(2024, CC BY 4.0): six compartments, dwarf tomato, September to November 2024. Other year, other teams,
+other crop, other lamps. `python scripts/final_test.py` puts it in the same columns and sends every
+greenhouse-day through the real API. How to map it (crop, pipe circuits, dimmable lamps) was written down
+in the script before the first run. The models have no history of these greenhouses, so this is the hard
+case: a new greenhouse in a new year.
+
+Run once, on 16 November 2026, published models `greenhouse-heating` v13 and `greenhouse-electricity` v12:
+
+| Heating (448 greenhouse-days, median over 6) | per day | per week | season total | days inside the 80% range |
+|---|---|---|---|---|
+| model | 0.47 MJ/m², R² 0.21 | ±62% | 60% off | 86% |
+| plain guess: the same as a week ago | 0.48 MJ/m² | ±57% | 23% off | |
+| plain guess: the average day of the training data | 1.37 MJ/m² | ±249% | 257% off | |
+
+| Lamp electricity | per day | per week | season total | days inside the 80% range |
+|---|---|---|---|---|
+| model | 0.40 kWh/m², R² −2.85 | ±64% | 63% off | **16%** |
+| plain guess: the same as a week ago | 0.13 kWh/m² | ±12% | 9% off | |
+
+**The models did not pass.** What the test shows:
+
+- **Heating is no better than "the same as a week ago"** for a new greenhouse in a new year, and over the
+  season it is worse (60% against 23%). Two compartments that hardly heated are predicted 3 to 6 times too
+  high. This confirms, more sharply, what the leave-one-greenhouse-out numbers already said: without the
+  greenhouse's own history the heating model should not be relied on.
+- **Electricity is 56-83% too high in every compartment**, a systematic error. These greenhouses have
+  62.5 W/m² LED lamps; the training data has only 117 and 142 W/m². Electricity is lamp hours times lamp
+  power, but a model that saw two lamp powers cannot learn a multiplication, and its tree half cannot go
+  below the lowest power it saw. The R² of 0.98 on the earlier editions hid this, because every test there
+  had a lamp power the model knew.
+- **The system did say so**: every one of these electricity predictions carried the warning that an input
+  was outside the training range. But the 80% range did not widen for it (16% inside). A range measured on
+  the training greenhouses says nothing about a situation the training data does not contain.
+
+**What we changed because of it** (so from here on the 2024 data is a check, not a final test):
+
+1. **Electricity gets the physics.** The model's lamp input is now lamp use, `lamp_kwh_m2` = hours × installed
+   power, and neither hours nor power on their own; as long as it saw raw hours it kept assuming the lamps it
+   knew. It is a straight line by design (`model.algorithms`), because only that carries a proportional
+   relation to lamps the data does not contain.
+2. **No range where nothing was measured.** When an input is clearly outside the training data, the response
+   has `"range": null` and a `range_note` saying which input, instead of a narrow range.
+3. **Low certainty means "maybe a greenhouse I do not know".** Its range is at least as wide as the error
+   measured on whole greenhouses the model never saw, and the message says so: *"If the model has no history
+   of this greenhouse, expect it to be off by up to about 1.1 MJ/m²; log a season for this greenhouse first
+   to rely on it."* On the 2024 data 98% of the heating days were already "low certainty"; now the number
+   and the range agree with that.
+
+The same 2024 data again, as a check:
+
+| | per week | season total | days inside the 80% range |
+|---|---|---|---|
+| electricity, before | ±64% | 63% off | 16% |
+| electricity, after | **±5%** | **4% off** | 100% |
+| electricity, plain guess "the same as a week ago" | ±12% | 9% off | |
+| heating, before and after (the model is unchanged) | ±62% | 60% off | 86% → 91% |
+| heating, plain guess "the same as a week ago" | ±57% | 23% off | |
+
+Electricity now beats the plain guess on greenhouses, a year and lamps it never saw. Heating is not better
+and we did not try to make it look better: giving it lamp use instead of lamp hours made no difference on
+the training greenhouses and was worse on 2024 (110% off), so that change was dropped. For heating the
+honest product is the one above: it tells a grower without history not to rely on it.
+
+The harvest models (`greenhouse-harvest-timing`, `tomato-season`) are not covered by this test.
 
 ## 5. Improvements to the pipeline found while doing this
 

@@ -12,14 +12,15 @@
     "time_column": "date",
     "target_min": 0,
     "drop_columns": [
-      "heat_mj_m2",
       "crop",
-      "heat_week_ago_mj_m2"
+      "heat_mj_m2",
+      "heat_week_ago_mj_m2",
+      "lamp_hours",
+      "lamp_power_w_m2"
     ],
     "units": {
       "heat_setpoint_c": "°C",
       "vent_setpoint_c": "°C",
-      "lamp_hours": "h/day",
       "energy_screen_pct": "%",
       "co2_setpoint_ppm": "ppm",
       "outside_temp_c": "°C",
@@ -30,7 +31,7 @@
       "electricity_kwh_m2": "kWh/m²",
       "rail_min_c": "°C",
       "grow_min_c": "°C",
-      "lamp_power_w_m2": "W/m²"
+      "lamp_kwh_m2": "kWh/m²/day"
     },
     "test_blocks": {
       "days": 14,
@@ -45,7 +46,10 @@
   },
   "model": {
     "runner": "onnx",
-    "version": "latest"
+    "version": "latest",
+    "algorithms": [
+      "linear_regression"
+    ]
   },
   "policy": {
     "contains_personal_data": false,
@@ -61,12 +65,12 @@
         "max": 26,
         "step": 0.5
       },
-      "lamp_hours": {
-        "label": "Lamp hours",
-        "unit": "h/day",
+      "lamp_kwh_m2": {
+        "label": "Lamp use (hours x installed power)",
+        "unit": "kWh/m²/day",
         "min": 0,
-        "max": 20,
-        "step": 1,
+        "max": 3.5,
+        "step": 0.1,
         "effects": {
           "electricity_kwh_m2": "increasing"
         }

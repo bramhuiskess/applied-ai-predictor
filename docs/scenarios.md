@@ -283,6 +283,105 @@ use cases with a `scenario` section and never for use cases with personal data (
 `policy.publish_evaluation_rows` allows it). Without a map, `certainty` is `null`. Training sets larger
 than 5,000 rows are subsampled and the counts scaled up.
 
+## A range around every number
+
+One number is not enough to plan on. Every regression prediction now comes with the range the real
+outcome will probably be in:
+
+```json
+"harvest_5_months_kg_m2": {"value": 12.75, "range": {"low": 11.95, "high": 13.55, "level": 0.8}}
+```
+
+It is in `/predict` (next to `prediction`) and in the base and every scenario and sweep point (next to
+`value`). The range is for the number itself. The difference between two scenarios keeps its own margin
+(ticket 5): both sides share most of their error, so it is not the sum of two ranges.
+
+**How it is measured** (conformal prediction, Vovk et al. 2005; Lei et al. 2018). The trainer takes the
+chosen model's errors on rows it did not learn from, and the distance that covered 80% of them becomes
+the half-width. No assumption about the shape of the errors is needed.
+
+- Rows not learned from: with `test_group` / `test_blocks` the groups or blocks that were left out in turn;
+  otherwise five held-out parts of the training data (consecutive periods for data in time order, so a
+  good or a bad year counts).
+- **Wider where the model knows less.** With a scenario section there is a half-width per certainty level
+  (comparable cases low / medium / high), and less certain is never narrower.
+- It stays within `target_min` / `target_max`.
+- The report and the descriptor state the widths and the share of **test rows** that fell inside.
+
+**Does it hold?** On the test rows of the 13 regression models:
+
+| | share of test rows inside the 80% range |
+|---|---|
+| 10 of 13 models | 79-88% |
+| `tomato-season`, harvest in 1 / 3 / 5 months | 73% / 60% / 60% |
+
+The harvest months ahead is the honest exception. Its error is mostly a whole-year effect (a sunny or a
+dark year shifts every greenhouse the same way), and the two test years, 2023 and 2024, are the two most
+extreme of the ten. Leaving each year out in turn, 80% of all cases fall inside, but per year it runs from
+49% to 99%. So for a forecast months ahead the range holds over the years, not within every single year.
+A weather outlook for the season would narrow that; it is not an input today.
+
+Example, nursery gas: ±3,250 m³ with many comparable batches, ±10,700 m³ with few.
+
+**Where the range stops** (added after the final test on greenhouses of another year, see
+[datasets.md](datasets.md)):
+
+- An input clearly outside the training data (more than 10% of the seen span beyond it): `"range": null`
+  plus a `range_note` naming the input. Nobody has measured the model's error there.
+- With `test_blocks.group`, "low certainty" is at least as wide as the error on a whole group the model
+  never saw, and the certainty message says what to expect without history of that group.
+
+## The best plan: "what should I do?"
+
+A scenario answers "what if I do this?". `POST /models/{id}/scenario/best` answers the grower's real question.
+It lays a grid over the levers (their own range and step, at most 2,000 plans), calculates every plan with the
+same engine as a scenario, and proposes the one with the best result:
+
+```json
+{"base": {"features": {...}}}
+```
+
+```json
+"advice": "Best plan for the highest net result in euros: harvest in the next 5 months 14.9% higher (+1.6 kg/m², worth +€6) ...",
+"best": {"plan": {"temp_plan_c": 22.5, "lamp_hours_plan": 14.0}, "net_eur": 2.1, "outputs": {...}, "certainty": {...}, "summary": "..."},
+"alternatives": [{"plan": {...}, "gain": 1.9, "certainty": "medium"}, ...],
+"searched": {"plans": 209, "trusted": 209, "min_gain": 0.94, "typical_error": 2.35, ...}
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `objective` | the highest net result in euros | or one output: `{"output": "gas_m3", "goal": "lowest"}` |
+| `levers` | all levers | search only these, keep the others as in `base` |
+| `min_gain` | 40% of the model's typical error in the objective's unit | advise only a plan that gains at least this |
+| `min_certainty` | `low` (no limit) | leave out plans with fewer comparable cases |
+| `top` | 5 | how many alternatives to list |
+
+An optimiser pushed against a model walks to wherever the model is most optimistic. So the defaults are set on
+evidence. The tomato simulator knows the true result of every plan, so we can see what following the advice
+really brings (`python scripts/make_tomato_season.py --check-finder`, 120 decisions from weather years the
+model never saw, net result per m² over 5 months compared with keeping the current plan):
+
+| | advice given | promised | **true gain** | share of the best possible | advice that made it worse |
+|---|---|---|---|---|---|
+| the finder (default) | 78% of cases | +€2.61 | **+€2.03** | 70% | 10% |
+| advising every gain, however small | 100% | +€2.73 | +€2.05 | 71% | 16% |
+| only plans with at least medium certainty | 78% | +€1.02 | +€0.59 | 20% | 19% |
+| the best plan in hindsight | | | +€2.88 | 100% | |
+
+What this shows:
+
+- **Following the advice pays**: about 70% of what hindsight would have given.
+- **It promises about a quarter too much** (+€2.61 promised, +€2.03 real). That is the price of choosing the
+  best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper estimate.
+- **Small gains are not worth acting on.** Of the advice that promised less than €1/m², about 4 in 10 made
+  things worse; above €2/m² almost none did. Hence `min_gain`: below it the advice is "keep the current settings".
+- **A limit on certainty did not help here**: it removed two thirds of the gain and the advice that was left
+  was not more reliable. It is available, but off by default. Plans with an input outside the training data
+  are always left out.
+
+This is measured in the simulator, where the true result of every plan is known. For a real greenhouse nobody
+can know what the other 208 plans would have given.
+
 ### Not in this ticket
 
 - Per-output retraining and outputs that depend on each other (weeks to harvest driving gas): outputs are

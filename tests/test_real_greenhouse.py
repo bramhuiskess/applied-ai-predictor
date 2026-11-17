@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LinearRegression, Ridge
 
+from fastapi.testclient import TestClient
+
 from predictor import bootstrap
 from predictor.core.manifest import ManifestError, load_manifest
 from predictor.trainer import models
@@ -323,3 +325,27 @@ def test_week_ago_column_is_the_same_greenhouse_seven_days_earlier():
     assert a.loc["2020-01-08", "heat_week_ago_mj_m2"] == 0.0 and a.loc["2020-01-09", "heat_week_ago_mj_m2"] == 1.0
     assert a.loc["2020-01-07"].isna()["heat_week_ago_mj_m2"]
     assert out[out.greenhouse == "B"]["heat_week_ago_mj_m2"].isna().all()   # never another greenhouse's value
+
+
+def test_low_certainty_says_what_to_expect_without_history(tmp_path):
+    greenhouses(tmp_path / "days.csv")
+    m = blocks_manifest(tmp_path / "days.csv")
+    m["training"]["units"] = {"heat": "MJ"}
+    m["scenario"]["case_label"] = "days"
+    result = train_use_case(write(tmp_path, m), bootstrap.build_registry(tmp_path / "models"))
+    r = result["range"]
+    assert r["by_certainty"]["low"] >= r["new_group_half_width"] > 0
+    assert "the error on a greenhouse the model never saw" in Path(result["report"]).read_text()
+    client = TestClient(bootstrap.build_app(tmp_path / "usecases", tmp_path / "models"))
+    body = client.post("/models/heat/scenario", json={"base": {"features": {"setpoint": 14.5, "outside": 30}},
+                                                      "scenarios": [{"name": "x", "changes": {"setpoint": 15}}]}).json()
+    message = body["base"]["certainty"]["message"]
+    assert body["base"]["certainty"]["level"] == "low"
+    assert "If the model has no history of this greenhouse" in message and "log a season" in message
+
+
+def test_lamp_use_is_hours_times_installed_power():
+    df = pd.DataFrame({"date": ["2020-01-01"], "greenhouse": ["A"], "crop": ["tomato"], "heat_setpoint_c": [19.0],
+                       "outside_temp_c": [5.0], "heat_mj_m2": [1.0], "electricity_kwh_m2": [1.4],
+                       "lamp_hours": [10.0], "lamp_power_w_m2": [142.5]})
+    assert agc.tidy(df)["lamp_kwh_m2"].iloc[0] == pytest.approx(1.425)

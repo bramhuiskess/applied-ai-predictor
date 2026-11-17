@@ -13,13 +13,13 @@
     "target_min": 0,
     "drop_columns": [
       "electricity_kwh_m2",
-      "lamp_power_w_m2",
-      "electricity_week_ago_kwh_m2"
+      "electricity_week_ago_kwh_m2",
+      "lamp_kwh_m2",
+      "lamp_power_w_m2"
     ],
     "units": {
       "heat_setpoint_c": "°C",
       "vent_setpoint_c": "°C",
-      "lamp_hours": "h/day",
       "energy_screen_pct": "%",
       "co2_setpoint_ppm": "ppm",
       "outside_temp_c": "°C",
@@ -29,7 +29,8 @@
       "outside_rh_pct": "%",
       "heat_mj_m2": "MJ/m²",
       "rail_min_c": "°C",
-      "grow_min_c": "°C"
+      "grow_min_c": "°C",
+      "lamp_hours": "h/day"
     },
     "test_blocks": {
       "days": 14,

@@ -254,6 +254,10 @@ def harvest_timing(extracted: Path, teams: list[str] = TEAMS) -> pd.DataFrame:
 def tidy(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["heat_setpoint_c", "outside_temp_c", "heat_mj_m2", "electricity_kwh_m2"]).copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    # What the lamps could use that day: hours x installed power. The models get this instead of hours and
+    # power separately; with only two lamp types in the data they cannot learn that multiplication themselves
+    # (the final test on 2024, with other lamps, was 56-83% too high because of it).
+    df["lamp_kwh_m2"] = df["lamp_hours"] * df["lamp_power_w_m2"] / 1000
     for col in df.select_dtypes("float").columns:
         df[col] = df[col].round(3)
     first = ["date", "greenhouse", "crop"]

@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 396 tests, die draaien ook op GitHub Actions
+- 431 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -59,7 +59,15 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
   (1 graad warmer = 2,9 dagen eerder). Zelf nalopen: `python scripts/check_greenhouse.py`
 - **oogst maanden vooruit** (`tomato-season`): een gewasmodel dat is afgesteld en getest op de echte kassen
   (seizoenstotaal 3,7% ernaast op een kas die het nooit zag), gedraaid op 10 jaar echt KNMI-weer. Antwoord op
-  "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 5,5% ernaast, 35% beter dan een simpele gok
+  "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 5,5% ernaast, 35% beter dan een simpele gok.
+  Eén scenario geeft ook het **nettoresultaat in euro's**: oogst min stook- en stroomkosten, met de eigen prijzen
+  van de teler ("1 graad warmer: oogst +€0,41, stoken −€0,44, netto −€0,08 per m²"). En het systeem zoekt zelf
+  het **beste plan** (`/scenario/best`): alle instellingen doorrekenen en het plan met het hoogste nettoresultaat
+  voorstellen. In de simulator levert het advies opvolgen +€2,03 per m² op (70% van wat achteraf maximaal kon)
+- **eindtest op een ander jaar** (4e Greenhouse Challenge, 2024, nergens op afgesteld): de stook- en stroommodellen
+  haalden het daar niet. Daarna gefixt: het stroommodel krijgt lampgebruik (uren × vermogen) en zit nu op 4% per seizoen;
+  het stookmodel zegt bij een kas zonder historie eerlijk dat je er niet op moet varen, en buiten de trainingsdata
+  komt er geen marge meer (zie [`docs/datasets.md`](docs/datasets.md))
 - een kapotte versie van de kwekerijdata (vastgelopen sensor, pieken, verkeerde eenheden) voor later
 
 ```bash
@@ -76,7 +84,8 @@ het verschil met nu in eenheden, procenten en euro's, en of dat verschil groter 
 > 1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292). Based on only 7 comparable batches in the
 > history; treat the size of the effect with some care.
 
-Elk scenario zegt ook hoeveel vergelijkbare gevallen er in de historie zijn. Bij weinig vergelijkbare
+Elk getal krijgt een marge waar de echte uitkomst in 80% van de gevallen binnen valt (gemeten op data die het
+model niet zag, breder waar het model minder weet). Elk scenario zegt ook hoeveel vergelijkbare gevallen er in de historie zijn. Bij weinig vergelijkbare
 gevallen is de voorspelling 3 tot 4 keer minder nauwkeurig, en dat zie je dan ook staan.
 
 Zie [`docs/scenarios.md`](docs/scenarios.md).
