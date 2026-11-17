@@ -75,7 +75,8 @@ def dark_factor(radiation: np.ndarray) -> np.ndarray:
     return season.lamp_hours(radiation, 1.0)
 
 
-def what_the_grower_knew(days: pd.DataFrame, decision_day: int, usual: dict[str, float], decision: pd.Timestamp) -> dict[str, float]:
+def what_the_grower_knew(days: pd.DataFrame, decision_day: int, usual: dict[str, float], decision: pd.Timestamp,
+                         sun_last_4_weeks: float | None = None) -> dict[str, float]:
     """The model's inputs on the decision day, from the real log of one compartment."""
     before, after = days.iloc[:decision_day], days.iloc[decision_day: decision_day + 152]
     if decision_day == 0:
@@ -91,11 +92,15 @@ def what_the_grower_knew(days: pd.DataFrame, decision_day: int, usual: dict[str,
     return {"decision_week": int(decision.isocalendar().week), "days_since_planting": decision_day,
             "temp_so_far_c": round(float(before["temp"].mean()), 2), "lamp_hours_so_far": round(lamp_setting(before), 1),
             "heat_last_4_weeks_mj_m2": round(heat_last_4_weeks, 2),
+            "sun_last_4_weeks_j_cm2": round(float(sun_last_4_weeks if sun_last_4_weeks is not None else history["radiation"].mean()), 1),
+            "harvest_so_far_kg_m2": round(float(days["kg"].iloc[:decision_day].sum()), 3),
+            # "sun_ahead_ratio" is left out on purpose: nobody knows the coming months, so the product assumes a
+            # normal year and widens its range to a dark and a sunny one
             "temp_plan_c": round(float(np.clip(after["temp"].mean(), 19.5, 24.5)), 2), "lamp_hours_plan": round(lamp_setting(after), 1),
             **PRICES, **{f"usual_{k}": round(v, 3) for k, v in usual.items() if k in season.OUTPUTS}}
 
 
-def replay(api: Api, decision_days: tuple[int, ...] = (14, 28, 56)) -> pd.DataFrame:
+def replay(api: Api, decision_days: tuple[int, ...] = (14, 28, 56, 84)) -> pd.DataFrame:
     real = heating.load_real(agc.download())
     order = api.get(f"/models/{USE_CASE}")["feature_schema"]["x-feature-order"]
     daily = knmi.load_daily(season.STATION, season.START, season.END).dropna(subset=["temp_mean_c", "radiation_j_cm2"]).reset_index(drop=True)
@@ -113,9 +118,15 @@ def replay(api: Api, decision_days: tuple[int, ...] = (14, 28, 56)) -> pd.DataFr
         for decision_day in decision_days:
             usual = season.season(average_year, decision_day, (season.NORMAL_TEMP_C, season.NORMAL_LAMP_HOURS),
                                   (season.NORMAL_TEMP_C, season.NORMAL_LAMP_HOURS))
-            features = what_the_grower_knew(days, decision_day, usual, planting + pd.Timedelta(days=decision_day))
-            body = api.post(f"/models/{USE_CASE}/predict", {"records": [{"features": {k: features[k] for k in order}}]})
-            outputs = body["predictions"][0]["outputs"]
+            radiation = window["radiation_j_cm2"].to_numpy()
+            start = decision_day + season.HISTORY_DAYS                 # the weather window starts four weeks before planting
+            features = what_the_grower_knew(days, decision_day, usual, planting + pd.Timedelta(days=decision_day),
+                                            sun_last_4_weeks=radiation[start - season.HISTORY_DAYS: start].mean())
+            # For the analysis only: the same forecast if the sun of the coming months had been known.
+            hindsight = dict(features, sun_ahead_ratio=round(float(radiation[start: start + 152].mean() / usual["sun_ahead_j_cm2"]), 3))
+            body = api.post(f"/models/{USE_CASE}/predict", {"records": [{"features": {k: row[k] for k in order if k in row}}
+                                                                        for row in (features, hindsight)]})
+            outputs, with_sun = body["predictions"][0]["outputs"], body["predictions"][1]["outputs"]
             for output, horizon in HORIZONS.items():
                 if decision_day + horizon > len(days):          # the season ended before this horizon
                     continue
@@ -126,6 +137,7 @@ def replay(api: Api, decision_days: tuple[int, ...] = (14, 28, 56)) -> pd.DataFr
                 rng = outputs[output].get("range")
                 rows.append({"greenhouse": greenhouse, "decision_day": decision_day, "output": output, "actual": actual,
                              "forecast": outputs[output]["prediction"], "plain_guess": usual[output],
+                             "forecast_knowing_the_sun": with_sun[output]["prediction"],
                              "inside_range": bool(rng and rng["low"] <= actual <= rng["high"]) if rng else np.nan})
     return pd.DataFrame(rows)
 
@@ -139,6 +151,7 @@ def summary(r: pd.DataFrame) -> pd.DataFrame:
                         "error_pct": (g["forecast"] - g["actual"]).abs().sum() / total * 100,
                         "bias_pct": (g["forecast"].sum() / total - 1) * 100,
                         "plain_guess_error_pct": (g["plain_guess"] - g["actual"]).abs().sum() / total * 100,
+                        "error_knowing_the_sun_pct": (g["forecast_knowing_the_sun"] - g["actual"]).abs().sum() / total * 100,
                         "inside_80_range_pct": g["inside_range"].mean() * 100}
     return pd.DataFrame(rows).T.round(2)
 

@@ -363,15 +363,15 @@ model never saw, net result per m² over 5 months compared with keeping the curr
 
 | | advice given | promised | **true gain** | share of the best possible | advice that made it worse |
 |---|---|---|---|---|---|
-| the finder (default) | 97% of cases | +€6.46 | **+€5.56** | 80% | 3% |
-| advising every gain, however small | 100% | +€6.49 | +€5.60 | 81% | 3% |
-| only plans with at least medium certainty | 77% | +€2.38 | +€2.19 | 32% | 7% |
-| the best plan in hindsight | | | +€6.91 | 100% | |
+| the finder (default) | 92% of cases | +€6.53 | **+€5.54** | 78% | 4% |
+| advising every gain, however small | 93% | +€6.54 | +€5.56 | 79% | 4% |
+| only plans with at least medium certainty | 48% | +€1.66 | +€1.33 | 19% | 7% |
+| the best plan in hindsight | | | +€7.07 | 100% | |
 
 What this shows:
 
-- **Following the advice pays**: about 80% of what hindsight would have given.
-- **It promises more than it delivers** (+€6.46 promised, +€5.56 real, 16% too much). That is the price of
+- **Following the advice pays**: about 78% of what hindsight would have given.
+- **It promises more than it delivers** (+€6.53 promised, +€5.54 real, 18% too much). That is the price of
   choosing the best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper
   estimate.
 - **Small gains are not worth acting on.** In an earlier version of the simulator, where gains were smaller, about
@@ -386,6 +386,36 @@ corrected on the real lamp logs: lamps now matter more, so there is more to win 
 
 This is measured in the simulator, where the true result of every plan is known. For a real greenhouse nobody
 can know what the other 208 plans would have given.
+
+## Inputs nobody knows yet: assumptions
+
+Some inputs matter a lot and are unknown on the day of the question, such as the sun of the coming months. Hiding
+them makes the model's error look like bad luck; asking the caller for them is asking the impossible. So the
+manifest can name them:
+
+```json
+"scenario": {"assumptions": {"sun_ahead_ratio": {
+    "label": "Sun in the coming five months, against a normal year",
+    "typical": 1.0, "low": 0.91, "high": 1.085, "low_label": "a dark year", "high_label": "a sunny year"}}}
+```
+
+The model is trained with what really came. When asking, the caller leaves the input out. The service then:
+
+- uses `typical` and says so (`assumed`);
+- adds an `outlook` to every number: what it would be at `low` and at `high`;
+- makes the range run from the lowest of those minus the model's own half-width to the highest plus it.
+
+```json
+"harvest_5_months_kg_m2": {"value": 12.7, "outlook": {"a dark year": 12.1, "a sunny year": 13.3},
+                           "range": {"low": 11.1, "high": 14.2, "level": 0.8}}
+```
+
+A caller who does know (a season forecast, or a what-if: "and in a dark year?") sends the input and gets the
+narrow range without an outlook. An assumption cannot also be a lever: a lever is chosen, an assumption is not
+known. The best-plan finder plans for the usual value.
+
+Why it matters: before this, the 80% range of the tomato forecast held in 52-81% of the cases in the two test
+years, because the error was mostly "which year was it". With the sun as an assumption it holds in 76-87%.
 
 ### Not in this ticket
 

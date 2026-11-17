@@ -7,7 +7,7 @@ scenario input of the API).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from predictor.core.manifest import ManifestError, ScenarioConfig
@@ -31,6 +31,10 @@ def check_scenario(use_case_id: str, scenario: ScenarioConfig | None, feature_sc
                                 "only numeric and yes/no inputs can be levers")
         if prop.get("x-kind") == "binary" and (lever.min, lever.max, lever.step) != (0, 1, 1):
             raise ManifestError(f"{use_case_id}: scenario lever {name!r} is yes/no, so use min 0, max 1, step 1")
+    for name in scenario.assumptions:
+        if properties.get(name, {}).get("x-kind") not in ("number", "integer"):
+            raise ManifestError(f"{use_case_id}: scenario assumption {name!r} is not a numeric input of the trained model "
+                                f"(inputs: {', '.join(feature_schema['x-feature-order'])}); retrain or fix the manifest")
     for name, output in scenario.outputs.items():
         if output.price_from and properties.get(output.price_from, {}).get("x-kind") not in ("number", "integer"):
             raise ManifestError(f"{use_case_id}: scenario output {name!r} takes its price from {output.price_from!r}, "
@@ -111,6 +115,7 @@ class ResolvedRequest:
     base: dict[str, Any]
     base_warnings: list[str]
     scenarios: list[ResolvedScenario]
+    assumed: list[str] = field(default_factory=list)   # unknown inputs the caller left out (set to their usual value)
 
 
 def resolve_scenarios(

@@ -37,8 +37,10 @@ def test_before_planting_there_is_no_log_so_the_first_two_weeks_stand_in():
 
 def test_the_score_is_a_share_of_what_was_really_measured():
     r = pd.DataFrame({"output": ["harvest"] * 3, "actual": [0.0, 10.0, 10.0], "forecast": [1.0, 11.0, 9.0],
-                      "plain_guess": [0.0, 15.0, 15.0], "inside_range": [False, True, True]})
+                      "plain_guess": [0.0, 15.0, 15.0], "forecast_knowing_the_sun": [0.0, 10.0, 10.0],
+                      "inside_range": [False, True, True]})
     table = replay.summary(r)
     assert table.loc["harvest", "error_pct"] == pytest.approx(15.0)             # 3 off on 20, also with a month of no harvest
     assert table.loc["harvest", "bias_pct"] == pytest.approx(5.0) and table.loc["harvest", "plain_guess_error_pct"] == pytest.approx(50.0)
     assert table.loc["harvest", "inside_80_range_pct"] == pytest.approx(66.67, abs=0.01)
+    assert table.loc["harvest", "error_knowing_the_sun_pct"] == 0
