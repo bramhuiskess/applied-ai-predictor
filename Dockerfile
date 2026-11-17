@@ -10,7 +10,7 @@ COPY usecases ./usecases
 COPY data ./data
 # Real greenhouse data (8 MB download); a local copy of the result is reused.
 RUN python scripts/make_datasets.py && python scripts/make_nursery.py && python scripts/make_arable.py \
-    && python scripts/make_tomato_season.py \
+    && python scripts/make_tomato_season.py && python scripts/make_orchid.py \
     && ([ -f data/greenhouse_days.csv ] || python scripts/make_greenhouse_challenge.py) \
     && predictor train
 

@@ -352,6 +352,65 @@ planted in December, about 5.5 months). Beyond that, for example a summer or a 1
 knowledge that speaks, not measured data. CO₂, humidity, diseases and fruit quality are not in it. The
 euro value uses an assumed 2.50 €/kg. A grower's own harvest records would replace the calibration.
 
+### A crop with phases: the pot orchid (`orchid-batch`)
+
+The grower's own crop is a pot orchid (Phalaenopsis), and it goes through phases, each in its own environment:
+raising the young plants, warm growth, and cooling to make the plant flower. His questions are *when* to move
+a batch to the next phase and *at what temperature*.
+
+**There is no open orchid dataset, so this crop model is not fitted on measurements.** `scripts/orchid_crop.py`
+is built on published research and Dutch practice, and its docstring says per relation where it comes from and
+which numbers are our own assumption. It is a demonstration that the product handles a crop with phases; the
+grower's own batch records would replace the numbers.
+
+| Published | In the model |
+|---|---|
+| Warm phases at a constant 28 °C keep the plant vegetative; 31 °C gives more leaves ([WUR](https://edepot.wur.nl/415899); [Lee et al. 2021](https://pmc.ncbi.nlm.nih.gov/articles/PMC8112652)) | leaves per week rise with temperature and light |
+| A day temperature of 29 °C or more prevents flowering, 26 °C or less induces it ([Blanchard 2005](https://d.lib.msu.edu/etd/33887/FULL_TEXT/view)) | cooling at 29 °C: no plants to sell; a warm phase below 27 °C: early spikes |
+| Cooling is about 8 weeks at 19 °C, then about 10 weeks at 21 °C; 8 weeks always gave more multi-spike plants; 22 °C can replace 19 °C in part ([Kas als Energiebron](https://kasalsenergiebron.nl/content/research/Eindrapport_13499.pdf); [WUR](https://edepot.wur.nl/163349)) | two-spike share falls with shorter or warmer cooling; the usual schedule takes 46 weeks |
+| 3, 4, 5 mol of light in the warm phases gave 1.88, 1.92, 2.03 spikes per plant ([WUR](https://edepot.wur.nl/178716)) | 1.82, 1.92, 2.00 |
+
+One row of `data/orchid_batches.csv` is one batch on real KNMI weather: the weeks in phase 1 and 2, the warm
+temperature, the weeks and temperature of cooling, the light of the greenhouse, and the grower's prices. Outputs:
+plants that can be sold, plants with two or more spikes (the better-paid class), spikes per plant, weeks to sale,
+and heating, cooling electricity and space per plant. A batch cooled in summer costs electricity, one raised in
+winter costs heat (the heat balance fitted on the real greenhouses).
+
+On batches of years the model never saw (2023-2024):
+
+| | typical error | plain guess: the usual schedule in an average year | better |
+|---|---|---|---|
+| plants with two or more spikes | 3 of 100 plants | | R² 0.95 |
+| weeks to sale | 0.4 weeks | 2.6 | 83% |
+| heating per plant | 0.61 MJ | 0.99 | 38% |
+| cooling electricity per plant | 0.08 kWh | 0.11 | 32% |
+
+Scenarios against the answer key (`python scripts/make_orchid.py --check`, net result per plant):
+
+| Scenario | true | predicted | right direction |
+|---|---|---|---|
+| cooling 2 weeks shorter | −€0.22 | −€0.22 | 99% |
+| cooling 2 °C warmer | −€0.10 | −€0.10 | 93% |
+| warm phases 1.5 °C colder | −€0.12 | −€0.10 | 98% |
+| 2 weeks longer warm growth | −€0.00 | −€0.01 | 83% |
+
+And the best-plan finder (`--check-finder`, 80 batches, compared with the batch's own schedule): following its
+advice gains **€0.25 per plant** on the true outcomes, 80% of the best possible in hindsight (€0.31), and none
+of the advice made a batch worse. Without being told, it proposes what Dutch growers do: about 17 weeks of
+raising, 11 weeks of warm growth, then 8 weeks of cooling at 19 °C, and a longer warm phase for greenhouses
+with less light.
+
+Two things we had to get right in the money, or the finder gave nonsense:
+
+- **Space has a real price.** With a low price per m² per week the longest schedule always looked best per
+  plant. A square metre also costs the next batch that has to wait.
+- **Plants are paid by class, not per spike.** Paying per spike made ever bigger plants ever better. A plant
+  with two spikes earns a premium; a third spike hardly pays.
+
+Limits: not validated on real orchids. It proposes 30-31 °C in the warm phases, because the model only knows
+"more leaves at 31 °C"; growers stay at 28 °C for reasons that are not in it (plant quality, disease, energy
+contracts). Cultivars differ a lot; there is one here. Phase 3 includes the finishing at 21 °C until sale.
+
 ### The final test: another year, nothing tuned on it
 
 Every number above comes from data we looked at while building. So we kept one test for the end: the
