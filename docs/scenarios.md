@@ -363,21 +363,26 @@ model never saw, net result per m² over 5 months compared with keeping the curr
 
 | | advice given | promised | **true gain** | share of the best possible | advice that made it worse |
 |---|---|---|---|---|---|
-| the finder (default) | 78% of cases | +€2.61 | **+€2.03** | 70% | 10% |
-| advising every gain, however small | 100% | +€2.73 | +€2.05 | 71% | 16% |
-| only plans with at least medium certainty | 78% | +€1.02 | +€0.59 | 20% | 19% |
-| the best plan in hindsight | | | +€2.88 | 100% | |
+| the finder (default) | 97% of cases | +€6.46 | **+€5.56** | 80% | 3% |
+| advising every gain, however small | 100% | +€6.49 | +€5.60 | 81% | 3% |
+| only plans with at least medium certainty | 77% | +€2.38 | +€2.19 | 32% | 7% |
+| the best plan in hindsight | | | +€6.91 | 100% | |
 
 What this shows:
 
-- **Following the advice pays**: about 70% of what hindsight would have given.
-- **It promises about a quarter too much** (+€2.61 promised, +€2.03 real). That is the price of choosing the
-  best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper estimate.
-- **Small gains are not worth acting on.** Of the advice that promised less than €1/m², about 4 in 10 made
-  things worse; above €2/m² almost none did. Hence `min_gain`: below it the advice is "keep the current settings".
+- **Following the advice pays**: about 80% of what hindsight would have given.
+- **It promises more than it delivers** (+€6.46 promised, +€5.56 real, 16% too much). That is the price of
+  choosing the best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper
+  estimate.
+- **Small gains are not worth acting on.** In an earlier version of the simulator, where gains were smaller, about
+  4 in 10 of the advice that promised less than €1/m² made things worse; above €2/m² almost none did. Hence
+  `min_gain`: below it the advice is "keep the current settings".
 - **A limit on certainty did not help here**: it removed two thirds of the gain and the advice that was left
   was not more reliable. It is available, but off by default. Plans with an input outside the training data
   are always left out.
+
+(The gains are larger than in the first version of this test, +€2.03, because the simulator's lamp rule was
+corrected on the real lamp logs: lamps now matter more, so there is more to win or lose with them.)
 
 This is measured in the simulator, where the true result of every plan is known. For a real greenhouse nobody
 can know what the other 208 plans would have given.

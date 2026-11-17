@@ -275,7 +275,7 @@ harvest curves. Tested by leaving each real greenhouse out in turn:
 
 ![Crop model against the real harvests](img/tomato_crop_model.png)
 
-`scripts/make_tomato_season.py` runs that crop model for 3,655 decisions on real KNMI weather of ten years.
+`scripts/make_tomato_season.py` runs that crop model for 3,614 decisions on real KNMI weather of ten years.
 One row is one decision: a greenhouse some weeks into its season, the settings so far and the plan from now
 on (temperature, lamp hours); the outputs are the harvest in the next 1, 3 and 5 months. The weather of
 those months is not an input, because nobody knows it in advance, so the model's error is an honest margin
@@ -283,19 +283,19 @@ for a forecast months ahead. Tested on weather years it never saw (2023-2025):
 
 | Harvest in the next | typical error | plain guess: a normal plan in an average year | better |
 |---|---|---|---|
-| 1 month | 0.09 kg/m² | 0.23 | 62% |
-| 3 months | 0.36 kg/m² | 0.74 | 51% |
-| 5 months | **0.68 kg/m² (5.5%)** | 1.05 | 35% |
+| 1 month | 0.09 kg/m² | 0.24 | 62% |
+| 3 months | 0.33 kg/m² | 0.83 | 60% |
+| 5 months | **0.56 kg/m² (4.0%)** | 1.31 | 57% |
 
 The simulator is also the answer key (`python scripts/make_tomato_season.py --check`, scenarios through
 the real engine on test decisions):
 
 | Scenario from now on | harvest in 5 months: crop model | trained model | right direction |
 |---|---|---|---|
-| 4 lamp hours more | +4.6% | +5.2% | 100% |
-| 4 lamp hours less | −4.5% | −5.5% | 100% |
-| 1 °C warmer | +1.1% (next month: +4.9%) | +0.7% (next month: +3.6%) | 72% (next month: 84%) |
-| 1 °C colder | −1.2% (next month: −5.1%) | −1.3% (next month: −4.4%) | 87% (next month: 88%) |
+| 4 lamp hours more | +7.5% | +7.6% | 100% |
+| 4 lamp hours less | −7.8% | −7.6% | 100% |
+| 1 °C warmer | +1.4% | +1.6% | 100% |
+| 1 °C colder | −1.7% | −1.7% | 100% |
 
 #### The net result of a plan, in euros
 
@@ -304,8 +304,10 @@ books what the next 5 months cost, and the use case has five outputs: harvest in
 (MJ/m²) and lamp electricity (kWh/m²) in the next 5 months. The grower's own prices are inputs
 (`tomato_price_eur_kg`, `heat_price_eur_mj`, `electricity_price_eur_kwh`), so one scenario answers in money:
 
-> 1 degree warmer: harvest in the next 5 months 1.1% higher (+0.12 kg/m², worth +€0.41); heating 11.1% higher
-> (+23.9 MJ/m², worth −€0.44); lamp electricity worth −€0.05. **Net worth −€0.08 per m².**
+> 1 degree warmer from now on: harvest in the next 5 months 1.5% higher (+0.26 kg/m², worth +€0.79); heating 9.9%
+> higher (+35.0 MJ/m², worth −€0.29); lamp electricity worth −€0.25. **Net worth +€0.26 per m².**
+>
+> (the real growers' compartment on 10 February 2020, at the challenge's prices)
 
 - **Heating** comes from a heat balance fitted on the real greenhouses (`scripts/greenhouse_heat.py`): loss
   through the glass minus sun and lamp heat, plus a base use, **times the greenhouse's own factor**. Growers
@@ -327,22 +329,55 @@ On weather years the model never saw (2023-2025):
 
 | Next 5 months | typical error | plain guess: a normal plan in an average year | better |
 |---|---|---|---|
-| harvest | 0.65 kg/m² (5.3%) | 1.03 | 37% |
-| heating | 53 MJ/m² (20%) | 102 | 48% |
-| lamp electricity | 13 kWh/m² (15%) | 26 | 51% |
+| harvest | 0.56 kg/m² (4.0%) | 1.31 | 57% |
+| heating | 49 MJ/m² (22%) | 95 | 48% |
+| lamp electricity | 17 kWh/m² (11%) | 46 | 63% |
 
 And the net result against the answer key (`--check`, per m² over 5 months):
 
 | Scenario from now on | true net change | predicted | right direction |
 |---|---|---|---|
-| 4 lamp hours more | −€0.49 | −€0.43 | 86% |
-| 4 lamp hours less | +€0.42 | +€0.38 | 77% |
-| 1 °C warmer | +€0.03 | +€0.03 | 59% |
-| 1 °C colder | −€0.08 | −€0.03 | 66% |
+| 4 lamp hours more | −€2.00 | −€2.12 | 93% |
+| 4 lamp hours less | +€1.83 | +€1.96 | 93% |
+| 1 °C warmer | +€0.21 | +€0.32 | 80% |
+| 1 °C colder | −€0.32 | −€0.32 | 85% |
 
-Read it like this: at these prices extra lamp hours cost more than they bring, and the model sees that. One
-degree of temperature is almost neutral in money (a little more and earlier harvest against more heating), so
-there the sign is close to a coin flip, and the response says the effect is within the margin.
+Read it like this: at these prices four extra lamp hours cost about €2 per m² more than they bring, and the
+model sees that. One degree warmer is a small plus (a little more and earlier harvest against more heating).
+
+#### Replaying a real season: what would it have told the growers?
+
+The numbers above are measured inside the simulator. `python scripts/replay_real_season.py` does the test that
+counts: the six real compartments of 2019-2020. On a decision day early in the season the product gets only
+what a grower knew that day (settings so far, the plan he then really followed, his heating of the last weeks)
+and its forecast is compared with what was really measured afterwards. The forecasting model never saw these
+greenhouses; the crop model and heat balance behind its simulator were fitted on them (six numbers in all).
+
+| Forecast on days 14, 28 and 56 of the season | error against the real outcome | plain guess: a normal plan in an average year | real outcome inside the 80% range |
+|---|---|---|---|
+| harvest, next month | 15% | 16% | 75% |
+| harvest, next 3 months | **7%** | 8% | 44% |
+| harvest, next 5 months | **10%** (all six too low) | 14% | 0% |
+| heating, next 5 months | **20%** | 32% | 75% |
+| lamp electricity, next 5 months | **8%** | 12% | 25% |
+
+One case as a grower would see it: the growers' own compartment on 10 February 2020. Forecast for the next three
+months: 9.6 kg/m² (range 9.3 to 9.9). Really harvested: 9.61 kg/m².
+
+What this real season taught us:
+
+- **It works on real greenhouses, and it is modestly better than the plain guess**, not dramatically. The plain
+  guess here is strong: it is our own crop model with a normal plan. The gain of the product is that it also
+  answers "what if".
+- **The first replay was 18% too low on the 5-month harvest.** The cause was one assumption in the simulator:
+  it switched the lamps off too early in spring, so it assumed 10% less light than these growers gave. The lamp
+  rule is now fitted on the real lamp logs, which brought it to 10%. (So for harvest and electricity this replay
+  is no longer an independent test of that rule.)
+- **The remaining 10% is the weather.** March to May 2020 was the sunniest spring of the ten years in the data
+  (19% more radiation than the other years). Nobody knew that in December.
+- **The 80% range is too narrow in an unusual year**, as the simulator tests already said: it holds over the
+  years, not within one. For a 5-month forecast the range should be read as "in a normal year".
+- The harvest is compared without the trial's final clean-up harvest of unripe trusses.
 
 What the money view leaves out: labour, CO₂, plants, depreciation, and that a tomato harvested in January pays
 more than one in May (the price is one average per decision).

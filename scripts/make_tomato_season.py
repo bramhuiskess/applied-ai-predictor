@@ -56,10 +56,18 @@ SCENARIOS = {"1 degree warmer": {"temp_plan_c": 1.0}, "1 degree colder": {"temp_
              "4 lamp hours more": {"lamp_hours_plan": 4.0}, "4 lamp hours less": {"lamp_hours_plan": -4.0}}
 
 
+LAMPS_OFF_ABOVE_J_CM2, LAMPS_RAMP_J_CM2 = 2550.0, 1690.0
+
+
 def lamp_hours(radiation: np.ndarray, hours_on_dark_days: float) -> np.ndarray:
-    """Growers light on dark days and switch off as the sun takes over (as in the real data: 16 h in winter, 0 in May)."""
+    """Growers light on dark days and switch off as the sun takes over.
+
+    Fitted on the lamp logs of the six real greenhouses: full hours up to a weekly average of about 860 J/cm2
+    of sun per day, then tapering to off at 2,550. (A first guess of "off at 1,500" gave 10% too little light,
+    which the replay of the real season showed as a harvest forecast that was 15% too low.)
+    """
     week = pd.Series(radiation).rolling(7, min_periods=1).mean().to_numpy()
-    return hours_on_dark_days * np.clip((1500.0 - week) / 900.0, 0.0, 1.0)
+    return hours_on_dark_days * np.clip((LAMPS_OFF_ABOVE_J_CM2 - week) / LAMPS_RAMP_J_CM2, 0.0, 1.0)
 
 
 def season(weather: pd.DataFrame, decision_day: int, before: tuple[float, float], after: tuple[float, float],
