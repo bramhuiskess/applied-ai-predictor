@@ -254,16 +254,32 @@ def harvest_timing(extracted: Path, teams: list[str] = TEAMS) -> pd.DataFrame:
 def tidy(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["heat_setpoint_c", "outside_temp_c", "heat_mj_m2", "electricity_kwh_m2"]).copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    # What the lamps could use that day: hours x installed power. The models get this instead of hours and
+    # power separately; with only two lamp types in the data they cannot learn that multiplication themselves
+    # (the final test on 2024, with other lamps, was 56-83% too high because of it).
+    df["lamp_kwh_m2"] = df["lamp_hours"] * df["lamp_power_w_m2"] / 1000
     for col in df.select_dtypes("float").columns:
         df[col] = df[col].round(3)
     first = ["date", "greenhouse", "crop"]
     return df[first + [c for c in df.columns if c not in first]].sort_values(["date", "greenhouse"]).reset_index(drop=True)
 
 
+def add_week_ago(df: pd.DataFrame) -> pd.DataFrame:
+    """A plain guess to measure the models against: the same greenhouse, the same weekday, one week earlier.
+
+    Only a yardstick (`baseline.use_as_input: false` in the manifests): a scenario or a forecast months ahead
+    cannot know last week's use. Empty for a greenhouse's first week and after a gap in the log.
+    """
+    earlier = df[["greenhouse", "date", "heat_mj_m2", "electricity_kwh_m2"]].copy()
+    earlier["date"] = (pd.to_datetime(earlier["date"]) + pd.Timedelta(days=7)).dt.strftime("%Y-%m-%d")
+    earlier = earlier.rename(columns={"heat_mj_m2": "heat_week_ago_mj_m2", "electricity_kwh_m2": "electricity_week_ago_kwh_m2"})
+    return df.merge(earlier, on=["greenhouse", "date"], how="left")
+
+
 def build(extracted: Path, extracted_2018: Path | None) -> tuple[pd.DataFrame, dict]:
     second, info = build_second(extracted)
     frames = [build_first(extracted_2018), second] if extracted_2018 else [second]
-    return tidy(pd.concat(frames, ignore_index=True)), info
+    return add_week_ago(tidy(pd.concat(frames, ignore_index=True))), info
 
 
 def main() -> None:

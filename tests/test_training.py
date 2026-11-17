@@ -8,7 +8,10 @@ from predictor.trainer.run import init_use_case, train_use_case
 
 
 def descriptor(project, use_case, version="1"):
-    return json.loads((project / "models" / use_case / version / "descriptor.json").read_text())
+    """The descriptor of the first output of a published version."""
+    directory = project / "models" / use_case / version
+    first = json.loads((directory / "use_case.json").read_text())["outputs"][0]
+    return json.loads((directory / first / "descriptor.json").read_text())
 
 
 @pytest.mark.parametrize("use_case", ["greenhouse-climate", "absence-forecast", "pump-failure", "pump-anomaly"])

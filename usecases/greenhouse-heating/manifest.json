@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.0",
   "use_case_id": "greenhouse-heating",
-  "description": "Heating energy per m² per day of real greenhouses (Autonomous Greenhouse Challenge, WUR): cucumber 2018 and tomato 2019-2020, 12 compartments. Tested on the two compartments run by Dutch commercial growers.",
+  "description": "Heating energy per m² per day of real greenhouses (Autonomous Greenhouse Challenge, WUR): cucumber 2018 and tomato 2019-2020, 12 compartments. Tested on 2-week blocks held out of every compartment (a greenhouse with its own history); the report also gives the score for a compartment the model has never seen.",
   "data_source": {
     "adapter": "csv-file",
     "path": "data/greenhouse_days.csv"
@@ -13,12 +13,13 @@
     "target_min": 0,
     "drop_columns": [
       "electricity_kwh_m2",
+      "electricity_week_ago_kwh_m2",
+      "lamp_kwh_m2",
       "lamp_power_w_m2"
     ],
     "units": {
       "heat_setpoint_c": "°C",
       "vent_setpoint_c": "°C",
-      "lamp_hours": "h/day",
       "energy_screen_pct": "%",
       "co2_setpoint_ppm": "ppm",
       "outside_temp_c": "°C",
@@ -28,14 +29,18 @@
       "outside_rh_pct": "%",
       "heat_mj_m2": "MJ/m²",
       "rail_min_c": "°C",
-      "grow_min_c": "°C"
+      "grow_min_c": "°C",
+      "lamp_hours": "h/day"
     },
-    "test_group": {
-      "column": "greenhouse",
-      "values": [
-        "Reference 2018",
-        "Reference 2020"
-      ]
+    "test_blocks": {
+      "days": 14,
+      "every": 5,
+      "group": "greenhouse"
+    },
+    "baseline": {
+      "column": "heat_week_ago_mj_m2",
+      "label": "the same as a week ago",
+      "use_as_input": false
     }
   },
   "model": {

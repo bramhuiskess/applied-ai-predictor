@@ -57,7 +57,7 @@ def compare(nursery, batches: list[dict], df: pd.DataFrame, registry, test_from:
             for o in MODELS:
                 truth[o].append(cf[o] - base[o])
         for output, use_case in MODELS.items():
-            model = registry.resolve(use_case)
+            model = registry.resolve("nursery").only(output)  # one version, a model per output
             pred = predict(model, changed.to_dict("records")) - predict(model, rows.to_dict("records"))
             true = np.array(truth[output])
             base_total = rows[output].sum()
@@ -199,7 +199,7 @@ def main() -> None:
              else knmi.synthetic_daily("2015-06-01", nursery_mod.END))
     df, nursery, batches = nursery_mod.generate(daily, args.compartments)
     registry = bootstrap.build_registry()
-    split = registry.resolve("nursery-gas").descriptor["split"]
+    split = registry.resolve("nursery").descriptor["split"]
     test_from = args.test_from or sorted(df["start_date"])[split["train"] + split["validation"]]
     result = compare(nursery, batches, df, registry, test_from)
     pd.set_option("display.width", 160)

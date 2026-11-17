@@ -114,6 +114,28 @@ class SweepRequest(BaseModel):
     step: float | None = Field(default=None, gt=0)
 
 
+class Objective(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    output: str
+    goal: Literal["highest", "lowest"]
+
+
+class BestPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False,
+                              json_schema_extra={"examples": [{"schema_version": "1.0", "base": EXAMPLE_SCENARIO["base"]}]})
+    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    base: Record
+    # Default: every lever of the use case.
+    levers: list[str] | None = Field(default=None, min_length=1)
+    # Default: the highest net result in euros (needs priced outputs in the manifest).
+    objective: Objective | None = None
+    # Leave out plans with fewer comparable cases than this ("low" = no limit).
+    min_certainty: Literal["low", "medium", "high"] = "low"
+    # Only advise a plan that gains at least this much (default: 40% of the model's typical error in the same unit).
+    min_gain: float | None = Field(default=None, ge=0)
+    top: int = Field(default=5, ge=0, le=20)
+
+
 def create_app(service: PredictionService) -> FastAPI:
     app = FastAPI(
         title="Applied AI prediction backend",
@@ -204,6 +226,22 @@ def create_app(service: PredictionService) -> FastAPI:
     )
     def sweep_scenario(use_case_id: str, body: SweepRequest) -> dict[str, Any]:
         return service.sweep(use_case_id, body.base.model_dump(), body.lever, body.from_, body.to, body.step)
+
+    @app.post(
+        "/models/{use_case_id}/scenario/best",
+        summary="Find the best plan",
+        description=(
+            "Tries every setting of the levers (their own range and step, at most 2000 plans) and proposes the plan "
+            "with the best result: the highest net result in euros by default, or one output to make as high or as low "
+            "as possible (`objective`). A plan is only advised when its gain is clearly larger than the model's own error "
+            "(`min_gain`); otherwise the advice is to keep the current settings. Plans outside the training data are left "
+            "out, and optionally plans with few comparable cases (`min_certainty`)."
+        ),
+    )
+    def best_plan(use_case_id: str, body: BestPlanRequest) -> dict[str, Any]:
+        return service.best_plan(use_case_id, body.base.model_dump(), body.levers,
+                                 body.objective.model_dump() if body.objective else None, body.min_certainty, body.top,
+                                 body.min_gain)
 
     @app.post("/models/{use_case_id}/predict")
     def predict(use_case_id: str, body: PredictRequest) -> dict[str, Any]:

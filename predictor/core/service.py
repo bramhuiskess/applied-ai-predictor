@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
+from predictor.core import plan as planning
+from predictor.core import ranges
 from predictor.core.certainty import SupportIndex, certainty
 from predictor.core.join_info import describe_joins
 from predictor.core.manifest import Manifest, ManifestError
@@ -20,6 +22,7 @@ from predictor.core.scenario import (
     check_scenario,
     compare,
     describe_scenario,
+    margin_of_error,
     resolve_scenarios,
     summarise,
     sweep_values,
@@ -51,11 +54,17 @@ class UseCase:
     manifest: Manifest
     model: LoadedModel | None
     validator: FeatureValidator | None
-    support: SupportIndex | None = None
+    supports: dict[str, SupportIndex] | None = None  # comparable-cases map per output (target name)
+    alias_of: tuple[str, str] | None = None  # (use case, output) when this is a single-output view of another one
 
     @property
     def status(self) -> str:
         return "ready" if self.model else "not_trained"
+
+    @property
+    def descriptors(self) -> dict[str, dict[str, Any]]:
+        """target name -> descriptor of every output (what the scenario code needs for margins and units)."""
+        return {om.descriptor.get("target_name") or om.name: om.descriptor for om in self.model.outputs.values()}
 
 
 @dataclass
@@ -91,11 +100,16 @@ class PredictionService:
                 check_schema(manifest.use_case_id, manifest.policy, model.feature_schema)
                 check_scenario(manifest.use_case_id, manifest.scenario, model.feature_schema)
                 _check_joined_levers(manifest, model)
+                _check_outputs_match(manifest, model)
                 validator = FeatureValidator(
                     model.feature_schema, reject_unknown_fields=manifest.policy.reject_unknown_fields
                 )
-            support = SupportIndex(model.support) if model and model.support and manifest.scenario else None
-            use_cases.append(UseCase(manifest, model, validator, support))
+            supports = _supports(manifest, model)
+            use_cases.append(UseCase(manifest, model, validator, supports))
+            for alias, output in manifest.aliases.items():  # an old id keeps working as one output of this use case
+                view = manifest.single_output(output, alias)
+                only = model.only(output) if model else None
+                use_cases.append(UseCase(view, only, validator, _supports(view, only), (manifest.use_case_id, output)))
         return cls(use_cases, monitor)
 
     # ------------------------------------------------------------------ queries
@@ -108,6 +122,8 @@ class PredictionService:
                 "status": uc.status,
                 "task_type": uc.model.descriptor["task_type"] if uc.model else None,
                 "model_version": uc.model.version if uc.model else None,
+                "outputs": list(uc.model.outputs) if uc.model else None,
+                "alias_of": {"use_case_id": uc.alias_of[0], "output": uc.alias_of[1]} if uc.alias_of else None,
             }
             for uc in self._use_cases.values()
         ]
@@ -128,6 +144,8 @@ class PredictionService:
             "classes": descriptor.get("classes"),
             "metrics": descriptor.get("metrics"),
             "trained_at": descriptor.get("trained_at"),
+            "outputs": {name: _summary(om.descriptor, "classes", "metrics", "trained_at")
+                        for name, om in uc.model.outputs.items()},
             "inputs": [
                 {
                     "name": name,
@@ -141,7 +159,7 @@ class PredictionService:
             ],
             "joins": _describe_joins(uc),
             "policy": uc.manifest.policy.model_dump(),
-            "scenario": describe_scenario(uc.manifest.scenario, schema, descriptor),
+            "scenario": describe_scenario(uc.manifest.scenario, schema, _scenario_descriptors(uc)),
             "feature_schema": schema,
         }
 
@@ -162,6 +180,8 @@ class PredictionService:
             "feature_importance": descriptor.get("feature_importance"),
             "split": descriptor.get("split"),
             "sample": descriptor.get("evaluation"),
+            "outputs": {name: _summary(om.descriptor, "metrics", "candidates", "reference", "feature_importance", "split")
+                        | {"sample": om.descriptor.get("evaluation")} for name, om in uc.model.outputs.items()},
         }
 
     # --------------------------------------------------------------- scenarios
@@ -185,6 +205,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0,
                       warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
         return {
@@ -199,7 +220,7 @@ class PredictionService:
     @staticmethod
     def _scenario_result(uc: UseCase, name: str, changes: list, features: dict, warnings: list,
                          base_row: dict, base_out: dict, out: dict, sure: dict | None) -> dict[str, Any]:
-        cfg, descriptor = uc.manifest.scenario, uc.model.descriptor
+        cfg, descriptor = uc.manifest.scenario, _scenario_descriptors(uc)
         comparison = compare(cfg, descriptor, base_row, base_out, features, out)
         return {"name": name, "changes": changes, "features": features, "warnings": warnings, "outputs": out,
                 "difference": comparison["outputs"], "net_eur": comparison["net_eur"], "certainty": sure,
@@ -207,11 +228,28 @@ class PredictionService:
 
     @staticmethod
     def _certainty(uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
-        """How many comparable training cases each row has (None when not available)."""
-        if uc.support is None:
+        """How many comparable training cases each row has (None when not available).
+
+        Every output has its own map (its rows, its important inputs). With several outputs a row shows the weakest
+        one, so the message never promises more than the least certain output, plus the numbers per output.
+        """
+        if not uc.supports:
             return [None] * len(rows)
-        counts = uc.support.comparable(uc.validator.to_matrix(rows))
-        return [certainty(c, uc.manifest.scenario.case_label) for c in counts]
+        matrix = uc.validator.to_matrix(rows)
+        label = uc.manifest.scenario.case_label
+        per_output = {name: uc.supports[name].comparable(matrix) for name in uc.supports}
+        unknown_site = _unknown_site_note(uc)
+        result = []
+        for i in range(len(rows)):
+            counts = {name: counts[i] for name, counts in per_output.items()}
+            weakest = certainty(min(counts.values()), label)
+            if weakest["level"] == "low" and unknown_site:
+                weakest["message"] += unknown_site
+            if len(counts) > 1:
+                weakest["by_output"] = {name: {k: v for k, v in certainty(c, label).items() if k != "message"}
+                                        for name, c in counts.items()}
+            result.append(weakest)
+        return result
 
     def sweep(self, use_case_id: str, base: dict[str, Any], lever: str, start: float | None = None,
               stop: float | None = None, step: float | None = None) -> dict[str, Any]:
@@ -226,9 +264,10 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure, rows)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
-                                                       uc.model.descriptor)["levers"] if l["name"] == lever)
+                                                       _scenario_descriptors(uc))["levers"] if l["name"] == lever)
         seen = lever_info["training_range"]
         return {
             **self._header(uc),
@@ -236,11 +275,109 @@ class PredictionService:
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
                      "value": resolved.base[lever], "outputs": outputs[0], "certainty": sure[0]},
             "points": [{"value": v, "outputs": out,
-                        "difference": compare(uc.manifest.scenario, uc.model.descriptor, resolved.base, outputs[0],
+                        "difference": compare(uc.manifest.scenario, _scenario_descriptors(uc), resolved.base, outputs[0],
                                               s.features, out)["outputs"],
                         "beyond_training_data": bool(seen) and not seen[0] <= v <= seen[1],
                         "certainty": c}
                        for v, s, out, c in zip(values, resolved.scenarios, outputs[1:], sure[1:])],
+        }
+
+    def best_plan(self, use_case_id: str, base: dict[str, Any], levers: list[str] | None = None,
+                  objective: dict[str, Any] | None = None, min_certainty: str = "low", top: int = 5,
+                  min_gain: float | None = None) -> dict[str, Any]:
+        """Try every setting of the levers and propose the plan with the best result, if it is worth mentioning."""
+        uc = self._scenario_use_case(use_case_id)
+        started = time.perf_counter()
+        scenario, descriptors = uc.manifest.scenario, _scenario_descriptors(uc)
+        levers = levers or list(scenario.levers)
+        problems = [{"scenario": None, "field": name, "message": f"{name!r} cannot be changed in a scenario; you can change: "
+                                                                 f"{', '.join(scenario.levers)}"}
+                    for name in levers if name not in scenario.levers]
+        outputs_known = {om.descriptor.get("target_name") or om.name for om in uc.model.outputs.values()}
+        priced = [name for name, config in scenario.outputs.items() if config.value_eur is not None or config.price_from]
+        if objective is None and not priced:
+            problems.append({"scenario": None, "field": "objective", "message": "no output of this use case has a price, so there "
+                             "is no net result to maximise; give an objective, e.g. {\"output\": \"...\", \"goal\": \"highest\"}"})
+        if objective is not None and objective["output"] not in outputs_known:
+            problems.append({"scenario": None, "field": "objective", "message": f"{objective['output']!r} is not an output; "
+                             f"choose from: {', '.join(sorted(outputs_known))}"})
+        if problems:
+            raise RequestRejected(problems, detail="invalid scenario request")
+
+        plans = planning.grid(scenario, levers)
+        requested = [{"name": f"plan {i + 1}", "changes": {k: {"set": v} for k, v in plan.items()}} for i, plan in enumerate(plans)]
+        resolved = self._resolve(uc, base.get("features"), requested)
+        rows = [resolved.base] + [s.features for s in resolved.scenarios]
+        outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure, rows)
+        self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
+        properties = uc.model.feature_schema["properties"]
+
+        def score(comparison: dict[str, Any]) -> float:
+            if objective is None:
+                return float(comparison["net_eur"] or 0.0)
+            change = comparison["outputs"][objective["output"]].get("change", 0.0)
+            return float(change if objective["goal"] == "highest" else -change)
+
+        candidates, low_certainty, outside = [], 0, 0
+        for plan, s, out, c in zip(plans, resolved.scenarios, outputs[1:], sure[1:]):
+            comparison = compare(scenario, descriptors, resolved.base, outputs[0], s.features, out)
+            beyond = ranges.outside_training(properties, s.features)
+            level = c["level"] if c else None
+            ok = planning.allowed(level, min_certainty) and not beyond
+            low_certainty += not planning.allowed(level, min_certainty)
+            outside += bool(beyond)
+            candidates.append({"plan": plan, "scenario": s, "out": out, "certainty": c, "score": score(comparison),
+                               "comparison": comparison, "ok": ok})
+        candidates.sort(key=lambda item: -item["score"])
+        trusted = [item for item in candidates if item["ok"]]
+
+        def short(item: dict[str, Any]) -> dict[str, Any]:
+            return {"plan": item["plan"], "gain": round(item["score"], 4), "net_eur": item["comparison"]["net_eur"],
+                    "certainty": item["certainty"]["level"] if item["certainty"] else None}
+
+        def full(item: dict[str, Any], name: str) -> dict[str, Any]:
+            s = item["scenario"]
+            return {**self._scenario_result(uc, name, s.changes, s.features, s.warnings, resolved.base, outputs[0],
+                                            item["out"], item["certainty"]),
+                    "plan": item["plan"], "gain": round(item["score"], 4)}
+
+        # A gain must be worth mentioning: at least a share of the model's typical error in the objective's unit.
+        margins = {name: margin_of_error(d) for name, d in _descriptors_by_output(uc).items()}
+        prices = {name: _price(config, resolved.base) for name, config in scenario.outputs.items()}
+        typical = planning.typical_error_of_objective(margins, prices, objective)
+        threshold = min_gain if min_gain is not None else (planning.MIN_GAIN_SHARE * typical if typical else 0.0)
+        top_trusted = trusted[0] if trusted and trusted[0]["score"] > 0 else None
+        best = full(top_trusted, "best plan") if top_trusted and top_trusted["score"] >= threshold else None
+        unlimited = candidates[0] if candidates and candidates[0]["score"] > 0 and not candidates[0]["ok"] else None
+        if best:
+            advice = f"Best plan for {planning.describe_objective(objective)}: " + best["summary"].split(": ", 1)[1]
+        elif top_trusted:
+            advice = (f"Keep the current settings. The best plan found would gain {top_trusted['score']:.2g}, less than the "
+                      f"{threshold:.2g} the model can tell apart from its own error.")
+        elif trusted:
+            advice = f"Keep the current settings: no plan beats them for {planning.describe_objective(objective)}."
+        else:
+            advice = ("The model has too few comparable cases for every plan it tried, so it cannot recommend one. "
+                      "Lower min_certainty to see what it would guess.")
+        return {
+            **self._header(uc),
+            "objective": objective or {"output": "net_eur", "goal": "highest"},
+            "levers": levers,
+            "searched": {"plans": len(plans), "trusted": len(trusted), "left_out_low_certainty": int(low_certainty),
+                         "left_out_outside_training_data": int(outside), "min_certainty": min_certainty,
+                         "min_gain": round(threshold, 4), "typical_error": round(typical, 4) if typical else None},
+            "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
+                     "outputs": outputs[0], "certainty": sure[0]},
+            "best": best,
+            "alternatives": [short(item) for item in trusted[1: 1 + top] if item["score"] >= threshold] if best else [],
+            # Found, but its gain is too small to tell apart from the model's error.
+            "best_below_min_gain": short(top_trusted) if top_trusted and not best else None,
+            # Shown, not recommended: what the model would pick if it ignored how little it knows there.
+            "best_without_limits": ({**short(unlimited), "warning": "not recommended: the model has too few comparable cases "
+                                     "for this plan or it lies outside its training data"} if unlimited else None),
+            "advice": advice,
         }
 
     def _scenario_use_case(self, use_case_id: str) -> UseCase:
@@ -273,23 +410,48 @@ class PredictionService:
         return resolved
 
     def _outputs(self, uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Model outputs per row, keyed by output name (one output now; more with multi-output)."""
-        output = uc.model.runner.predict(uc.validator.to_matrix(rows))
-        target = uc.model.descriptor.get("target_name")
-        if uc.model.descriptor["task_type"] == "classification":
-            return [{target: {"value": output.values[i],
-                              "probabilities": {k: round(v, 6) for k, v in output.probabilities[i].items()}}}
-                    for i in range(len(rows))]
-        results = []
-        for i in range(len(rows)):
-            value, warning = self._bounded(uc, float(output.values[i]))
-            results.append({target: {"value": round(value, 6), **({"warning": warning} if warning else {})}})
+        """Model outputs per row, keyed by output name: one input matrix, every output's own model."""
+        matrix = uc.validator.to_matrix(rows)
+        results: list[dict[str, Any]] = [{} for _ in rows]
+        for om in uc.model.outputs.values():
+            output = om.runner.predict(matrix)
+            target = om.descriptor.get("target_name") or om.name
+            for i in range(len(rows)):
+                if om.descriptor["task_type"] == "classification":
+                    results[i][target] = {"value": output.values[i],
+                                          "probabilities": {k: round(v, 6) for k, v in output.probabilities[i].items()}}
+                else:
+                    value, warning = self._bounded(om.descriptor, float(output.values[i]))
+                    results[i][target] = {"value": round(value, 6), **({"warning": warning} if warning else {})}
         return results
 
     @staticmethod
-    def _bounded(uc: UseCase, value: float) -> tuple[float, str | None]:
+    def _add_ranges(uc: UseCase, outputs: list[dict[str, Any]], sure: list[dict[str, Any] | None],
+                    rows: list[dict[str, Any]]) -> None:
+        """Put the 80% range next to every regression value, as wide as the row's certainty asks for.
+
+        A row outside the values the model was trained on gets no range: its error there was never measured.
+        """
+        properties = uc.model.feature_schema["properties"]
+        outside = [ranges.outside_training(properties, row) for row in rows]
+        for om in uc.model.outputs.values():
+            spec = om.descriptor.get("range")
+            if not spec:
+                continue
+            target = om.descriptor.get("target_name") or om.name
+            for out, c, beyond in zip(outputs, sure, outside):
+                if beyond:
+                    out[target]["range"], out[target]["range_note"] = None, ranges.unavailable_note(beyond)
+                    continue
+                level = (c.get("by_output", {}).get(om.name) or c)["level"] if c else None
+                around = ranges.around(spec, out[target]["value"], level, om.descriptor.get("target_bounds"))
+                if around:
+                    out[target]["range"] = around
+
+    @staticmethod
+    def _bounded(descriptor: dict[str, Any], value: float) -> tuple[float, str | None]:
         """Keep a regression output within the target's physical limits (e.g. gas >= 0)."""
-        bounds = uc.model.descriptor.get("target_bounds")
+        bounds = descriptor.get("target_bounds")
         if not bounds:
             return value, None
         low, high = bounds
@@ -388,27 +550,45 @@ class PredictionService:
         return _Checked(record_id, features, errors, [*join_warnings, *warnings], filled)
 
     def _run(self, uc: UseCase, checked: list[_Checked]) -> list[dict[str, Any]]:
+        """One prediction per record. One output keeps the flat shape; several give an ``outputs`` map."""
         matrix = uc.validator.to_matrix([c.features for c in checked])
-        output = uc.model.runner.predict(matrix)
-        task = uc.model.descriptor["task_type"]
-        results = []
-        for i, c in enumerate(checked):
-            item: dict[str, Any] = {"record_id": c.record_id}
-            if task == "regression":
-                value, warning = self._bounded(uc, float(output.values[i]))
-                item["prediction"] = round(value, 6)
-                if warning:
-                    c.warnings.append(warning)
-            elif task == "classification":
-                item["prediction"] = output.values[i]
-                item["probabilities"] = {k: round(v, 6) for k, v in output.probabilities[i].items()}
-            else:
-                item["prediction"] = output.values[i]
-                item["anomaly_score"] = round(float(output.scores[i]), 6)
+        several = len(uc.model.outputs) > 1
+        results: list[dict[str, Any]] = [{"record_id": c.record_id} for c in checked]
+        # Certainty level per output and row (where the model has a map of its training data): sets the range's width.
+        levels = {name: [certainty(n)["level"] for n in index.comparable(matrix)] for name, index in (uc.supports or {}).items()}
+        properties = uc.model.feature_schema["properties"]
+        outside = [ranges.outside_training(properties, c.features) for c in checked]
+        for om in uc.model.outputs.values():
+            output = om.runner.predict(matrix)
+            task = om.descriptor["task_type"]
+            for i, c in enumerate(checked):
+                part: dict[str, Any] = {}
+                if task == "regression":
+                    value, warning = self._bounded(om.descriptor, float(output.values[i]))
+                    part["prediction"] = round(value, 6)
+                    if om.descriptor.get("range") and outside[i]:
+                        part["range"], part["range_note"] = None, ranges.unavailable_note(outside[i])
+                    else:
+                        around = ranges.around(om.descriptor.get("range"), value, levels[om.name][i] if om.name in levels else None,
+                                               om.descriptor.get("target_bounds"))
+                        if around:
+                            part["range"] = around
+                    if warning:
+                        c.warnings.append(f"{om.name}: {warning}" if several else warning)
+                elif task == "classification":
+                    part["prediction"] = output.values[i]
+                    part["probabilities"] = {k: round(v, 6) for k, v in output.probabilities[i].items()}
+                else:
+                    part["prediction"] = output.values[i]
+                    part["anomaly_score"] = round(float(output.scores[i]), 6)
+                if several:
+                    results[i].setdefault("outputs", {})[om.name] = part
+                else:
+                    results[i].update(part)
+        for item, c in zip(results, checked):
             item["warnings"] = c.warnings
             if c.filled:
                 item["filled_in"] = c.filled
-            results.append(item)
         return results
 
     def _header(self, uc: UseCase) -> dict[str, Any]:
@@ -420,6 +600,7 @@ class PredictionService:
             "task_type": descriptor["task_type"],
             "target_name": descriptor.get("target_name"),
             "target_unit": descriptor.get("target_unit"),
+            "outputs": {name: _summary(om.descriptor) for name, om in uc.model.outputs.items()},
         }
 
     def _monitor(
@@ -479,3 +660,63 @@ def _describe_joins(uc: UseCase) -> list[dict[str, Any]]:
     """For clients: how the model's inputs are connected to lookup tables and what can be sent instead."""
     return describe_joins(uc.model.joins, uc.model.descriptor, set(uc.model.feature_schema["properties"]),
                           uc.manifest.training.units)
+
+
+# ------------------------------------------------------------------------------ several outputs
+
+def _summary(descriptor: dict[str, Any], *extra: str) -> dict[str, Any]:
+    """The few descriptor keys a client needs per output (plus the ``extra`` ones)."""
+    keys = ("task_type", "algorithm", "target_name", "target_unit", *extra)
+    return {key: descriptor.get(key) for key in keys}
+
+
+def _scenario_descriptors(uc: UseCase) -> dict[str, Any]:
+    """What the scenario code needs: the descriptor (one output) or target name -> descriptor (several)."""
+    return uc.descriptors if len(uc.model.outputs) > 1 else uc.model.descriptor
+
+
+def _check_outputs_match(manifest: Manifest, model: LoadedModel) -> None:
+    """A use case that declares several outputs must be served from a version that has exactly those."""
+    declared = set(manifest.training.outputs)
+    if declared and declared != set(model.outputs):
+        raise ManifestError(f"{manifest.use_case_id}: the trained version has outputs {sorted(model.outputs)} but the "
+                            f"manifest declares {sorted(declared)}; retrain with `predictor train {manifest.use_case_id}`")
+    for alias, output in manifest.aliases.items():
+        if output not in model.outputs:
+            raise ManifestError(f"{manifest.use_case_id}: alias {alias!r} points at output {output!r}, which the trained "
+                                f"version does not have; retrain")
+
+
+def _supports(manifest: Manifest, model: LoadedModel | None) -> dict[str, SupportIndex] | None:
+    """The comparable-cases map of every output (keyed by target name), when scenarios need it and it was stored."""
+    if model is None or manifest.scenario is None:
+        return None
+    found = {om.descriptor.get("target_name") or om.name: SupportIndex(om.support)
+             for om in model.outputs.values() if om.support}
+    return found or None
+
+
+def _unknown_site_note(uc: UseCase) -> str | None:
+    """For low certainty: what to expect if the model has no history of this site (measured on sites left out in training)."""
+    if len(uc.model.outputs) != 1:
+        return None
+    descriptor = next(iter(uc.model.outputs.values())).descriptor
+    width, group = (descriptor.get("range") or {}).get("new_group_half_width"), (descriptor.get("new_group") or {}).get("column")
+    if width is None or not group:
+        return None
+    unit = f" {descriptor['target_unit']}" if descriptor.get("target_unit") else ""
+    return (f" If the model has no history of this {group}, expect it to be off by up to about {width:.2g}{unit}; "
+            f"log a season for this {group} first to rely on it.")
+
+
+def _descriptors_by_output(uc: UseCase) -> dict[str, dict[str, Any]]:
+    return {om.descriptor.get("target_name") or om.name: om.descriptor for om in uc.model.outputs.values()}
+
+
+def _price(config: Any, row: dict[str, Any]) -> float | None:
+    """Euros per unit of an output for this request (None when the output has no price)."""
+    if config.value_eur is not None:
+        return float(config.value_eur)
+    if config.price_from and row.get(config.price_from) is not None:
+        return float(row[config.price_from])
+    return None

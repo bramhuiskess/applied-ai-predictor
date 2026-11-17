@@ -39,7 +39,7 @@ def nursery(tmp_path_factory):
     daily = knmi.synthetic_daily("2015-06-01", "2025-12-31", seed=21)
     df, sim, _ = make_nursery.generate(daily, compartments=6, seed=31)
     write_nursery_tables(root, df, daily, sim)
-    manifest = repoint_nursery(json.loads((ROOT / "usecases" / "nursery-gas" / "manifest.json").read_text()), root)
+    manifest = repoint_nursery(json.loads((ROOT / "usecases" / "nursery" / "manifest.json").read_text()), root)
     registry = bootstrap.build_registry(root / "models")
     result = train_use_case(write(root, manifest), registry)
     client = TestClient(bootstrap.build_app(root / "usecases", root / "models"))
@@ -69,7 +69,7 @@ def predict(client, features: dict) -> dict:
 # --------------------------------------------------------------------------- training
 
 def test_the_model_version_carries_the_join_snapshot(nursery):
-    model_dir = nursery["root"] / "models" / "nursery-gas" / "1"
+    model_dir = nursery["root"] / "models" / "nursery" / "1"
     assert (model_dir / "joins.json").is_file()
     assert (model_dir / "lookups" / "weather.npz").is_file() and (model_dir / "lookups" / "compartment.npz").is_file()
     spec = json.loads((model_dir / "joins.json").read_text())
@@ -97,7 +97,7 @@ def test_joined_training_data_equals_the_columns_that_were_baked_in(nursery):
     from predictor.trainer.join import apply_joins
     import pandas as pd
 
-    manifest = load_manifest(nursery["root"] / "usecases" / "nursery-gas")
+    manifest = load_manifest(nursery["root"] / "usecases" / "nursery")
     base = pd.read_csv(nursery["root"] / "nursery_base.csv")
     joined = apply_joins(manifest, base).df
     full = pd.read_csv(nursery["root"] / "nursery.csv")
@@ -290,11 +290,11 @@ def test_chained_joins_train_in_order(tmp_path):
 
 
 def test_the_registry_writes_bytes_and_subdirectories_and_refuses_paths_outside_the_version(tmp_path):
-    from predictor.adapters.fs_registry import FilesystemRegistry
+    from predictor.adapters.fs_registry import FilesystemRegistry, PublishedOutput
 
     registry = FilesystemRegistry(tmp_path, {"fake": lambda path, descriptor: object()})
-    meta = dict(descriptor={"runner": "fake", "task_type": "regression"}, feature_schema={"properties": {}},
-                artifact_name="model.bin", artifact=b"m")
+    meta = dict(outputs={"y": PublishedOutput({"runner": "fake", "task_type": "regression"}, b"m")},
+                feature_schema={"properties": {}})
     version = registry.publish("uc", **meta, extra_files={"lookups/a.npz": b"\x00\x01\x02", "notes.txt": "hello"})
     assert (tmp_path / "uc" / version / "lookups" / "a.npz").read_bytes() == b"\x00\x01\x02"
     for bad in ("../escape.txt", "/tmp/escape.txt", "lookups/../../escape.txt"):
@@ -309,7 +309,7 @@ def test_a_damaged_join_snapshot_stops_the_service_with_a_clear_error(nursery, t
     import shutil
 
     shutil.copytree(nursery["root"] / "models", tmp_path / "models")
-    version = tmp_path / "models" / "nursery-gas" / "1"
+    version = tmp_path / "models" / "nursery" / "1"
     (version / "lookups" / "weather.npz").write_bytes(b"not a numpy file")
     with pytest.raises(LookupError, match="cannot load the join snapshot"):
         bootstrap.build_service(nursery["root"] / "usecases", tmp_path / "models")

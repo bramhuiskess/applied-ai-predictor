@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 321 tests, die draaien ook op GitHub Actions
+- 431 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -53,13 +53,26 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
 - **gesimuleerde kwekerij** op echt KNMI-weer 2016-2025, met een *antwoordmodel*: voor elk scenario weten we de echte uitkomst, dus we kunnen testen of de voorspelling klopt
 - **echte akkerbouwdata** (CBS + KNMI, 1999-2025), met een backtest: trainen tot 2020, testen op 2021-2025
 - **echte kasdata** (Autonomous Greenhouse Challenge van WUR, 12 kassen, komkommer 2018 + tomaat 2019-20):
-  stookenergie, lampstroom en **oogsttijd**, getest op de kassen van de echte telers die het model nooit zag.
-  Stoken per seizoen 2-6% naast de echte waarde, stroom 1-3%, oogsttijd ±2,3 dagen (1 graad warmer = 2,9 dagen eerder)
+  stookenergie, lampstroom en **oogsttijd**. Twee eerlijke cijfers per model: voor een kas met eigen historie
+  (stoken ±14% per week, twee keer zo goed als "zelfde als vorige week") en voor een kas die het model nooit zag
+  (±32%, dus eerst een seizoen data verzamelen). Stroom ±2% per week, oogsttijd ±2,3 dagen
+  (1 graad warmer = 2,9 dagen eerder). Zelf nalopen: `python scripts/check_greenhouse.py`
+- **oogst maanden vooruit** (`tomato-season`): een gewasmodel dat is afgesteld en getest op de echte kassen
+  (seizoenstotaal 3,7% ernaast op een kas die het nooit zag), gedraaid op 10 jaar echt KNMI-weer. Antwoord op
+  "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 5,5% ernaast, 35% beter dan een simpele gok.
+  Eén scenario geeft ook het **nettoresultaat in euro's**: oogst min stook- en stroomkosten, met de eigen prijzen
+  van de teler ("1 graad warmer: oogst +€0,41, stoken −€0,44, netto −€0,08 per m²"). En het systeem zoekt zelf
+  het **beste plan** (`/scenario/best`): alle instellingen doorrekenen en het plan met het hoogste nettoresultaat
+  voorstellen. In de simulator levert het advies opvolgen +€2,03 per m² op (70% van wat achteraf maximaal kon)
+- **eindtest op een ander jaar** (4e Greenhouse Challenge, 2024, nergens op afgesteld): de stook- en stroommodellen
+  haalden het daar niet. Daarna gefixt: het stroommodel krijgt lampgebruik (uren × vermogen) en zit nu op 4% per seizoen;
+  het stookmodel zegt bij een kas zonder historie eerlijk dat je er niet op moet varen, en buiten de trainingsdata
+  komt er geen marge meer (zie [`docs/datasets.md`](docs/datasets.md))
 - een kapotte versie van de kwekerijdata (vastgelopen sensor, pieken, verkeerde eenheden) voor later
 
 ```bash
 pip install -e '.[datasets]' && python scripts/make_greenhouse_challenge.py   # echte kasdata (17 MB download)
-python scripts/make_nursery.py --faults && python scripts/make_arable.py && predictor train
+python scripts/make_nursery.py --faults && python scripts/make_arable.py && python scripts/make_tomato_season.py && predictor train
 python scripts/check_scenarios.py   # klopt het model met het antwoordmodel?
 ```
 
@@ -71,7 +84,8 @@ het verschil met nu in eenheden, procenten en euro's, en of dat verschil groter 
 > 1 degree warmer: gas use 20.6% lower (-5,210 m³, worth +€2,292). Based on only 7 comparable batches in the
 > history; treat the size of the effect with some care.
 
-Elk scenario zegt ook hoeveel vergelijkbare gevallen er in de historie zijn. Bij weinig vergelijkbare
+Elk getal krijgt een marge waar de echte uitkomst in 80% van de gevallen binnen valt (gemeten op data die het
+model niet zag, breder waar het model minder weet). Elk scenario zegt ook hoeveel vergelijkbare gevallen er in de historie zijn. Bij weinig vergelijkbare
 gevallen is de voorspelling 3 tot 4 keer minder nauwkeurig, en dat zie je dan ook staan.
 
 Zie [`docs/scenarios.md`](docs/scenarios.md).
@@ -94,6 +108,40 @@ weer in de 10 weken na `start_date`":
 - komt het venster buiten de data (volgend jaar), dan kan het manifest kiezen voor het gemiddelde van dezelfde periode in andere jaren, met een waarschuwing
 
 Zie [`docs/technical.md`](docs/technical.md#joining-datasets).
+
+De kwekerij is één use case, `nursery`, met vier uitkomsten (weken tot oogst, verkochte planten, gas, elektriciteit).
+De oude ids (`nursery-gas`, `nursery-harvest-weeks`, `nursery-plants-sold`, `nursery-electricity`) werken nog als alias.
+
+## Meerdere uitkomsten in één use case
+
+Een use case kan meerdere dingen tegelijk voorspellen uit dezelfde invoer, bijvoorbeeld gas én verkochte planten:
+
+- in het manifest staat `training.outputs` (naam → eenheid, grenzen, baseline, `algorithms`) in plaats van één `target`; `target` blijft werken voor één uitkomst
+- invoer, joins, privacyregels en levers declareer je één keer; één `predictor train` geeft één modelversie met een apart model per uitkomst
+- de uitkomsten zijn nooit elkaars features, dus er lekt niets van de ene uitkomst naar de andere
+- per uitkomst kies je het model met `algorithms`: één naam forceert dat model, meerdere namen beperken de keuze, weglaten werkt als vanouds (baseline vs. LightGBM)
+- `aliases` laten de oude use-case-ids doorwerken als losse use case met één uitkomst
+- `/predict` geeft bij meerdere uitkomsten een `outputs`-blok per record; bij één uitkomst is het antwoord ongewijzigd
+- het dashboard toont een chip per uitkomst en een lijst met alle uitkomsten
+
+```jsonc
+{
+  "use_case_id": "nursery",
+  "training": {
+    "time_column": "start_date",
+    "drop_columns": ["batch_id", "compartment"],
+    "outputs": {
+      "weeks_to_harvest": { "unit": "weeks" },
+      "gas_m3": { "unit": "m³", "target_min": 0, "algorithms": ["lightgbm"] },       // geforceerd
+      "electricity_kwh": { "unit": "kWh", "target_min": 0, "algorithms": ["blend", "lightgbm"] }   // keuze uit twee
+    }
+  },
+  "model": { "runner": "onnx", "version": "latest" },
+  "aliases": { "nursery-gas": "gas_m3", "nursery-electricity": "electricity_kwh" }
+}
+```
+
+Zie [`docs/technical.md`](docs/technical.md#several-outputs).
 
 ## Nog te doen
 

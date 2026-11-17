@@ -40,10 +40,43 @@ class PreparedData:
     chronological: bool
     notes: list[str] = field(default_factory=list)
     times: pd.Series | None = None  # time each target value refers to (for charts)
-    groups: pd.Series | None = None  # test_group column, for holding out whole groups
+    groups: pd.Series | None = None  # test_group / test_blocks.group column, for holding out whole groups
 
 
-def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedData:
+SharedFeatures = tuple[list[FeatureSpec], list[str]]  # (feature specs, notes about dropped columns)
+
+
+def shared_features(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> SharedFeatures:
+    """The inputs of a use case with several outputs, profiled ONCE on all rows.
+
+    Every output drops its own rows without a value, so profiling per output could give one output other
+    category codes, kinds or ranges than the schema that is published; with this every output encodes the same way.
+    """
+    outputs = list(cfg.output_configs())
+    no_target = cfg.model_copy(update={
+        "target": None, "outputs": {}, "task": "anomaly", "baseline": None, "target_min": None, "target_max": None,
+        "horizon_steps": None, "evaluation_label": None, "drop_columns": [*cfg.drop_columns, *outputs]})
+    data = prepare(df, no_target, policy)
+    return data.features, [n for n in data.notes if n.startswith("dropped column")]
+
+
+def _encode(df: pd.DataFrame, specs: list[FeatureSpec]) -> pd.DataFrame:
+    """Apply already profiled feature specs to a table (same codes for categories as the specs say)."""
+    columns: dict[str, pd.Series] = {}
+    for spec in specs:
+        if spec.name not in df.columns:
+            raise TrainingError(f"input {spec.name!r} is missing from the data of this output")
+        col = df[spec.name]
+        if spec.kind == "categorical":
+            codes = {c: i for i, c in enumerate(spec.categories or [])}
+            columns[spec.name] = col.map(lambda v: codes.get(str(v), np.nan) if pd.notna(v) else np.nan).astype(float)
+        else:
+            columns[spec.name] = col.astype(float)
+    return pd.DataFrame(columns)
+
+
+def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy, shared: SharedFeatures | None = None) -> PreparedData:
+    """Turn a table into model-ready data. With ``shared`` (several outputs) the inputs are not profiled again."""
     notes: list[str] = []
     df = df.rename(columns=cfg.rename_columns).copy()
 
@@ -55,7 +88,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         )
 
     baseline_column = cfg.baseline.column if cfg.baseline else None
-    group_column = cfg.test_group.column if cfg.test_group else None
+    group_column = (cfg.test_group.column if cfg.test_group
+                    else cfg.test_blocks.group if cfg.test_blocks else None)
     missing = [c for c in [*cfg.drop_columns, cfg.target, cfg.time_column, cfg.evaluation_label, baseline_column,
                            group_column]
                if c and c not in df.columns]
@@ -104,7 +138,8 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
             if baseline_column:
                 if not pd.api.types.is_numeric_dtype(df[baseline_column]):
                     raise TrainingError(f"baseline column {baseline_column!r} must be numeric")
-                persistence = df[baseline_column]  # the simple guess; it may also stay a feature
+                # the simple guess; it stays a feature unless the manifest says it is only the yardstick
+                persistence = df[baseline_column] if cfg.baseline.use_as_input else df.pop(baseline_column)
         keep = y_raw.notna()
         if not keep.all():
             notes.append(f"dropped {int((~keep).sum())} rows without a target value")
@@ -125,7 +160,11 @@ def prepare(df: pd.DataFrame, cfg: TrainingConfig, policy: Policy) -> PreparedDa
         # Only used to split; never an input, or the model would just learn each group.
         groups = df.pop(group_column).astype(str).reset_index(drop=True)
 
-    specs, X = _profile_features(df, notes)
+    if shared is None:
+        specs, X = _profile_features(df, notes)
+    else:
+        specs, X = list(shared[0]), _encode(df, shared[0])
+        notes.extend(shared[1])
     if not specs:
         raise TrainingError("no usable feature columns left after profiling")
 
