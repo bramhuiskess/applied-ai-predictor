@@ -133,7 +133,7 @@ def test_jsonl_with_a_byte_order_mark_is_accepted(tmp_path):
 def test_jsonl_does_not_convert_text_to_numbers(tmp_path):
     path = tmp_path / "text.jsonl"
     path.write_text('{"a": "1"}\n{"a": "2"}\n')
-    assert read_table("jsonl-file", path)["a"].tolist() == ["1", "2"] 
+    assert read_table("jsonl-file", path)["a"].tolist() == ["1", "2"]
 
 
 def test_a_bad_jsonl_line_is_reported_with_its_line_number(tmp_path):
@@ -147,6 +147,15 @@ def test_a_bad_jsonl_line_is_reported_with_its_line_number(tmp_path):
 def test_a_jsonl_line_that_is_not_an_object_is_refused(line):
     with pytest.raises(ValueError, match="line 2 is not a JSON object"):
         read_jsonl_stream(io.StringIO('{"a": 1}\n' + line + "\n"))
+
+@pytest.mark.parametrize("records", [
+    [{"a_b": 1, "a": {"b": 2}}],
+    [{"a": {"b": 2}, "a_b": 1}], 
+    [{"a_b": 1}, {"a": {"b": 2}}], 
+])
+def test_flattening_that_would_overwrite_a_value_is_refused(records):
+    with pytest.raises(ValueError, match="column 'a_b' is made from more than one key"):
+        read_jsonl_stream(io.StringIO("\n".join(json.dumps(r) for r in records)))
 
 
 FEATURES = {"pump_type": "A", "vibration_mm_s": 3.0, "pressure_bar": 6.0, "filter_ok": 1}

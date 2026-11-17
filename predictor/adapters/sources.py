@@ -46,9 +46,26 @@ def read_jsonl_stream(stream: Iterable[str], name: str = "<stream>") -> pd.DataF
 def _to_table(records: list[dict]) -> pd.DataFrame:
     import pandas as pd
 
-    if any(isinstance(value, dict) for record in records for value in record.values()):
-        return pd.json_normalize(records, sep="_") 
-    return pd.DataFrame(records)
+    sources: dict[str, tuple[str, ...]] = {} 
+
+    def flatten(obj: dict, path: tuple[str, ...] = ()) -> dict:
+        flat = {}
+        for key, value in obj.items():
+            here = path + (key,)
+            if isinstance(value, dict):
+                flat.update(flatten(value, here))
+                continue
+            column = "_".join(here)
+            if sources.setdefault(column, here) != here or column in flat:
+                other = sources[column]
+                raise ValueError(
+                    f"column {column!r} is made from more than one key: "
+                    f"{'.'.join(other)!r} and {'.'.join(here)!r}; rename one of them"
+                )
+            flat[column] = value
+        return flat
+
+    return pd.DataFrame([flatten(record) for record in records])
 
 
 def _read_jsonl(path: Path) -> pd.DataFrame:
