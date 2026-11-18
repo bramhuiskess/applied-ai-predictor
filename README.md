@@ -34,7 +34,17 @@ docker run --rm -p 8000:8000 applied-ai-predictor
 Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
 http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
-Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/technical.md`](docs/technical.md).
+Zonder Docker kan ook (vereist Python 3.11+):
+
+```bash
+./scripts/setup.sh && . .venv/bin/activate   # of: uv sync
+predictor setup                               # begeleide installatie in de browser (localhost)
+predictor setup --cli --with-data --yes       # dezelfde stappen, volledig in de terminal
+predictor run                                 # controleert alles en start het dashboard
+```
+
+Standaard is het "serve-only": zonder `--with-data` wordt er geen democdata opgehaald. Wat je nodig hebt en hoe je
+een pakket bouwt staat in [`docs/technical.md`](docs/technical.md).
 
 ## Wat kan het nu
 

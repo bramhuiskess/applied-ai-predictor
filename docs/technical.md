@@ -36,6 +36,31 @@ docker run --rm -p 8000:8000 applied-ai-predictor     # dashboard on http://loca
 The image is built in two stages. Training happens in the first stage; the serving image
 contains **no pandas, scikit-learn or LightGBM**, only the ONNX runtime.
 
+### Setup and the application package
+
+```bash
+predictor setup                  # guided, in the browser on localhost (asks: install the demo data?)
+predictor setup --cli            # the same steps in the terminal; --yes = no questions, --with-data = demo data
+predictor doctor [--json]        # read-only check: manifests, dataset hashes, columns, models; exit code 1 on errors
+predictor data fetch [ids]       # run the demo generators and write datasets/<id>/dataset.json
+predictor package build --out p  # bundle usecases + models (serve-only); --with-data adds the datasets; .tar.gz ok
+predictor package verify p       # offline check of a package folder or archive (sha256 per file)
+predictor run                    # doctor, then serve
+predictor --home p run           # work in another folder (or PREDICTOR_HOME=p)
+```
+
+**What is needed?** `make_datasets` is never required: it only writes demo CSVs.
+
+| You want to | You need |
+|---|---|
+| serve | `usecases/<id>/manifest.json` and `models/<id>/<n>/` (`feature_schema.json`, `use_case.json`, per output `descriptor.json` + `model.onnx`). No data. |
+| train | the above manifest plus the data file named in `data_source.path` (csv, jsonl, parquet) |
+| paste a dataset | `datasets/<id>/dataset.json` (id = folder name; `files[].path` relative to the project folder, with `sha256`, `rows` and `columns`); `predictor doctor` then verifies it |
+
+`dataset.json` is schema only. Linking a use case to a dataset by id belongs to the "adding datasets" backlog item and
+is not implemented. A package (`package.json` with a sha256 per file) is used like a project: `predictor --home <package> run`.
+The setup wizard only answers on localhost and is not part of `predictor serve`.
+
 ### Local development
 
 Python 3.11 or newer is required (macOS's built-in 3.9 does not work; `brew install python@3.12`).

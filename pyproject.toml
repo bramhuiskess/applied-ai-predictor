@@ -40,6 +40,7 @@ include = ["predictor*"]
 
 [tool.setuptools.package-data]
 "predictor.core" = ["dashboard.html"]
+"predictor" = ["setup.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

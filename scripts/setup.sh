@@ -35,3 +35,4 @@ fi
 
 echo
 echo "Done with $(.venv/bin/python --version). Activate with:  . .venv/bin/activate"
+echo "Next: predictor setup   (guided, in the browser; or: predictor setup --cli --with-data)"

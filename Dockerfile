@@ -8,11 +8,9 @@ RUN pip install --no-cache-dir ".[train,datasets]"
 COPY scripts ./scripts
 COPY usecases ./usecases
 COPY data ./data
-# Real greenhouse data (8 MB download); a local copy of the result is reused.
-RUN python scripts/make_datasets.py && python scripts/make_nursery.py && python scripts/make_arable.py \
-    && python scripts/make_tomato_season.py \
-    && ([ -f data/greenhouse_days.csv ] || python scripts/make_greenhouse_challenge.py) \
-    && predictor train
+# `predictor data fetch` runs the generators (the real greenhouse data is an 8 MB download; files that
+# are already in data/ are reused) and describes each dataset in datasets/<id>/dataset.json.
+RUN predictor data fetch && predictor train
 
 # Stage 2: the serving image. No pandas, scikit-learn or LightGBM: the core only
 # needs the ONNX runtime, which proves the core is independent of training libraries.

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Predictor setup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1d2733; }
+  h1 { font-size: 1.5rem; } h2 { font-size: 1.05rem; margin: 0 0 .4rem; }
+  section { border: 1px solid #d6dde5; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; }
+  section.off { opacity: .45; pointer-events: none; }
+  .ok { color: #1a7f37; } .warn { color: #9a6700; } .error { color: #cf222e; }
+  li { margin: .15rem 0; } .hint { color: #57606a; }
+  button { font: inherit; padding: .45rem 1rem; border-radius: 6px; border: 1px solid #8c959f; background: #f6f8fa; cursor: pointer; margin-right: .5rem; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  pre { background: #0d1117; color: #c9d1d9; padding: .7rem; border-radius: 6px; max-height: 14rem; overflow: auto; font-size: 12px; }
+  code { background: #eef1f4; padding: 0 .25rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Predictor setup</h1>
+<p class="hint">Everything here can also be done in the terminal: <code>predictor setup --cli</code>, or the single commands
+<code>doctor</code>, <code>data fetch</code>, <code>train</code>, <code>run</code>.</p>
+
+<section id="s1"><h2>1. Check</h2><ul id="findings">Checking ...</ul>
+  <button onclick="load()">Check again</button></section>
+
+<section id="s2" class="off"><h2>2. Demo data</h2>
+  <p>Install the demo data? It is needed to train the demo use cases; without it you can still serve existing models
+  or add your own data later. Some sets are downloaded (KNMI, CBS, WUR; roughly 250 MB).</p>
+  <ul id="datasets"></ul>
+  <button class="primary" onclick="demo(true)">Yes, install the demo data</button>
+  <button onclick="demo(false)">No, skip</button>
+  <span id="demo-answer" class="hint"></span></section>
+
+<section id="s3" class="off"><h2>3. Train</h2>
+  <p id="train-info"></p>
+  <button class="primary" id="train-btn" onclick="train()">Train now</button></section>
+
+<section id="s4" class="off"><h2>4. Start</h2>
+  <p>This stops the wizard and starts the dashboard on the same address.</p>
+  <button class="primary" onclick="finish()">Open the dashboard</button></section>
+
+<pre id="log" hidden></pre>
+
+<script>
+const $ = id => document.getElementById(id);
+let status = null, polling = false;
+const post = (url, body) => fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+  body: body === undefined ? undefined : JSON.stringify(body)}).then(async r => ({ok: r.ok, data: await r.json()}));
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+
+async function load() {
+  status = await (await fetch('/setup/api/status')).json();
+  $('findings').innerHTML = status.findings.map(f =>
+    `<li class="${f.level}"><b>${esc(f.level)}</b> ${esc(f.check)}: ${esc(f.message)}` +
+    (f.hint ? ` <span class="hint">&rarr; ${esc(f.hint)}</span>` : '') + '</li>').join('');
+  $('datasets').innerHTML = status.demo_data.map(d =>
+    `<li>${esc(d.id)}: ${esc(d.description)} <span class="hint">(${d.present ? 'on disk' : 'not fetched'})</span></li>`).join('');
+  const ready = !status.has_errors;
+  $('s2').classList.toggle('off', !ready);
+  $('s3').classList.toggle('off', !ready || status.demo_answer === null && !status.trainable.length);
+  $('s4').classList.toggle('off', !ready);
+  $('demo-answer').textContent = status.demo_answer === null ? '' : (status.demo_answer ? 'answer: yes' : 'answer: no');
+  $('train-info').textContent = status.trainable.length
+    ? `Use cases ready to train: ${status.trainable.join(', ')}.`
+    : 'Nothing to train (no untrained use case has its data here).';
+  $('train-btn').disabled = !status.trainable.length;
+}
+
+async function demo(install) {
+  const r = await post('/setup/api/demo-data', {install});
+  if (!r.ok) { alert(r.data.detail); return; }
+  if (r.data.started) follow(); else load();
+}
+async function train() {
+  const r = await post('/setup/api/train');
+  if (!r.ok) { alert(r.data.detail); return; }
+  follow();
+}
+function follow() {
+  if (polling) return;
+  polling = true; $('log').hidden = false;
+  const tick = async () => {
+    const j = await (await fetch('/setup/api/job')).json();
+    $('log').textContent = j.log.join('\n') + (j.error ? '\nFAILED: ' + j.error : '');
+    $('log').scrollTop = 1e9;
+    if (j.state === 'running') { setTimeout(tick, 700); return; }
+    polling = false; load();
+  };
+  tick();
+}
+async function finish() {
+  await post('/setup/api/finish');
+  $('s4').innerHTML = '<h2>4. Start</h2><p>Starting the dashboard ...</p>';
+  const wait = async () => {
+    try {
+      const r = await fetch('/health');
+      if (r.ok && (await r.json()).status === 'ok') { location = '/'; return; }
+    } catch (e) { /* server restarting */ }
+    setTimeout(wait, 600);
+  };
+  setTimeout(wait, 800);
+}
+load();
+</script>
+</body>
+</html>
