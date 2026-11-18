@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from predictor import bootstrap, workflow
+from predictor import bootstrap, serving, workflow
 from predictor.core.manifest import MANIFEST_FILENAME, ManifestError
 from predictor.trainer.errors import TrainingError
 
@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
                          help="do the setup in the terminal instead of the browser")
     p_setup.add_argument("--with-data", action="store_true", help="install the demo data (default: serve-only)")
     p_setup.add_argument("--yes", action="store_true", help="never ask; answer the questions with their defaults")
+    p_setup.add_argument("--reconfigure", action="store_true",
+                         help="run the setup again even if the project is already set up (default: just start it)")
     p_setup.add_argument("--host", default="127.0.0.1")
     p_setup.add_argument("--port", type=int, default=8000)
 
@@ -50,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run = sub.add_parser("run", help="check the project, then start the HTTP API and dashboard")
     p_run.add_argument("--host", default="127.0.0.1")
     p_run.add_argument("--port", type=int, default=8000)
+    p_run.add_argument("--open", action="store_true", help="open the dashboard in the browser once it is up")
 
     p_init = sub.add_parser("init", help="profile a new dataset and scaffold its use-case manifest")
     p_init.add_argument("use_case_id")
@@ -168,7 +171,7 @@ def _run(args: argparse.Namespace) -> int:
     if has_errors(findings):
         print("not starting: fix the errors above (see `predictor doctor`)", file=sys.stderr)
         return 1
-    return _serve(args)
+    return serving.start(args.host, args.port, open_browser=args.open)
 
 
 def _ask(question: str, default: bool) -> bool:
@@ -181,6 +184,9 @@ def _ask(question: str, default: bool) -> bool:
 def _setup(args: argparse.Namespace) -> int:
     if args.cli:
         return _setup_terminal(args)
+    if not args.reconfigure and workflow.is_set_up():
+        print("Already set up, starting. Use `predictor setup --reconfigure` to go through the setup again.")
+        return serving.start(args.host, args.port, open_browser=True)
     return _setup_browser(args)
 
 
@@ -206,7 +212,7 @@ def _setup_terminal(args: argparse.Namespace) -> int:
     ids = workflow.trainable()
     if ids and installed_train_extra() and (args.with_data or args.yes or _ask(f"Train {len(ids)} use case(s) now?", True)):
         workflow.train_ids(ids)
-    print("\nready. Start it with: predictor run")
+    print("\nready. Start it with: predictor run --open")
     return 1 if has_errors(workflow.doctor()) else 0
 
 
@@ -232,9 +238,7 @@ def _setup_browser(args: argparse.Namespace) -> int:
     server.run()
     if not finished.is_set():
         return 0
-    print(f"starting the dashboard on http://{args.host}:{args.port}")
-    uvicorn.run(bootstrap.build_app(), host=args.host, port=args.port)
-    return 0
+    return serving.start(args.host, args.port)  # the wizard page opens the dashboard itself
 
 
 def _init(args: argparse.Namespace) -> int:

@@ -6,18 +6,47 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1d2733; }
-  h1 { font-size: 1.5rem; } h2 { font-size: 1.05rem; margin: 0 0 .4rem; }
+  h1 { font-size: 1.5rem; } h2 { font-size: 1.05rem; margin: 0 0 .4rem; } h3 { font-size: .95rem; margin: 1rem 0 .3rem; }
   section { border: 1px solid #d6dde5; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; transition: border-color .15s, box-shadow .15s; }
   section.off { opacity: .45; pointer-events: none; }
   section.active { border-color: #1f6feb; box-shadow: inset 3px 0 0 #1f6feb; }
   .ok { color: #1a7f37; } .warn { color: #9a6700; } .error { color: #cf222e; }
   li { margin: .15rem 0; } .hint { color: #57606a; }
+  a { color: #1f6feb; }
   button { font: inherit; padding: .45rem 1rem; border-radius: 6px; border: 1px solid #8c959f; background: #f6f8fa; cursor: pointer; margin-right: .5rem; }
   button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
   button:disabled { opacity: .55; cursor: not-allowed; }
   button.busy:disabled { opacity: 1; cursor: progress; }
+  button.small-btn { padding: .1rem .55rem; font-size: 13px; margin-left: .4rem; }
   pre { background: #0d1117; color: #c9d1d9; padding: .7rem; border-radius: 6px; max-height: 14rem; overflow: auto; font-size: 12px; }
   code { background: #eef1f4; padding: 0 .25rem; border-radius: 3px; }
+
+  /* stepper */
+  .stepper { display: flex; flex-wrap: wrap; gap: .4rem .2rem; list-style: none; padding: 0; margin: 1.2rem 0 .3rem; }
+  .stepper li { display: flex; align-items: center; margin: 0; }
+  .stepper li + li::before { content: ""; width: 1.6rem; height: 2px; background: #d6dde5; margin: 0 .3rem; }
+  .stepper li.done + li::before, .stepper li.current + li.upcoming::before { background: #d6dde5; }
+  .stepper li.done + li::before { background: #1a7f37; }
+  .stepper button { display: flex; align-items: center; gap: .45rem; border: 0; background: none; padding: .2rem .35rem; margin: 0; border-radius: 6px; }
+  .stepper .dot { display: inline-flex; align-items: center; justify-content: center; width: 1.6rem; height: 1.6rem; border-radius: 50%;
+                  border: 2px solid #c8d1db; font-size: 13px; font-weight: 600; color: #57606a; background: #fff; }
+  .stepper .label { color: #57606a; }
+  .stepper li.current .dot { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .stepper li.current .label { color: #1d2733; font-weight: 600; }
+  .stepper li.done .dot { background: #1a7f37; border-color: #1a7f37; color: #fff; }
+  .stepper li.problem .dot { background: #cf222e; border-color: #cf222e; color: #fff; }
+  .stepper button[data-locked="1"] { cursor: default; }
+  .viewtoggle { font-size: 13px; margin: 0 0 .5rem; }
+
+  /* guided view: only the current card is open */
+  .summary { display: none; align-items: center; gap: .5rem; font-size: 14px; color: #57606a; }
+  .summary .mark { color: #1a7f37; font-weight: 700; }
+  body.guided section.step-done .body, body.guided section.step-upcoming .body, body.guided section.step-problem:not(.step-current) .body { display: none; }
+  body.guided section.step-done .summary { display: flex; }
+  body.guided section.step-upcoming { opacity: .55; }
+  body.all .nav { display: none; }
+  .nav { margin-top: 1rem; display: flex; align-items: center; }
+  .nav .spacer { flex: 1; }
 
   /* loading states */
   .spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid #c8d1db; border-top-color: #1f6feb;
@@ -38,50 +67,137 @@
     .bar::after { animation: none; left: 0; width: 100%; opacity: .35; }
     section { transition: none; }
   }
+  .nexttime { background: #f6f8fa; border-radius: 6px; padding: .6rem .9rem; margin-top: 1rem; }
+  .nexttime ul { margin: .2rem 0; padding-left: 1.2rem; }
 </style>
 </head>
-<body>
+<body class="guided">
 <h1>Predictor setup</h1>
 <p class="hint">Everything here can also be done in the terminal: <code>predictor setup --cli</code>, or the single commands
 <code>doctor</code>, <code>data fetch</code>, <code>train</code>, <code>run</code>.</p>
 
-<section id="s1"><h2>1. Check</h2><ul id="findings"></ul>
-  <button id="b-check" onclick="check()">Check again</button>
-  <div class="status" id="st-s1" role="status" aria-live="polite" hidden></div></section>
+<ol class="stepper" id="stepper" aria-label="Setup steps"></ol>
+<div class="viewtoggle"><a href="#" id="toggle" onclick="toggleView(); return false;">Show all steps</a></div>
 
-<section id="s2" class="off"><h2>2. Demo data</h2>
-  <p>Install the demo data? It is needed to train the demo use cases; without it you can still serve existing models
-  or add your own data later. Some sets are downloaded (KNMI, CBS, WUR; roughly 250 MB).</p>
-  <ul id="datasets"></ul>
-  <button class="primary" id="b-demo-yes" onclick="demo(true)">Yes, install the demo data</button>
-  <button id="b-demo-no" onclick="demo(false)">No, skip</button>
-  <span id="demo-answer" class="hint"></span>
-  <div class="status" id="st-s2" role="status" aria-live="polite" hidden></div></section>
+<section id="s1">
+  <h2>1. Check</h2>
+  <div class="summary"><span class="mark">&#10003;</span><span class="sum-text"></span><a href="#" onclick="goTo(0); return false;">Change</a></div>
+  <div class="body">
+    <ul id="findings"></ul>
+    <button id="b-check" onclick="check()">Check again</button>
+    <div class="status" id="st-s1" role="status" aria-live="polite" hidden></div>
+    <div class="nav"><span class="spacer"></span><button class="primary" id="next-1" onclick="step(1)">Continue</button></div>
+  </div>
+</section>
 
-<section id="s3" class="off"><h2>3. Train</h2>
-  <p id="train-info"></p>
-  <button class="primary" id="b-train" onclick="train()">Train now</button>
-  <div class="status" id="st-s3" role="status" aria-live="polite" hidden></div></section>
+<section id="s2">
+  <h2>2. Demo data</h2>
+  <div class="summary"><span class="mark">&#10003;</span><span class="sum-text"></span><a href="#" onclick="goTo(1); return false;">Change</a></div>
+  <div class="body">
+    <p>Install the demo data? It is needed to train the demo use cases; without it you can still serve existing models
+    or add your own data later. Some sets are downloaded (KNMI, CBS, WUR; roughly 250 MB).</p>
+    <ul id="datasets"></ul>
+    <button class="primary" id="b-demo-yes" onclick="demo(true)">Yes, install the demo data</button>
+    <button id="b-demo-no" onclick="demo(false)">No, skip</button>
+    <span id="demo-answer" class="hint"></span>
+    <div class="status" id="st-s2" role="status" aria-live="polite" hidden></div>
+    <div class="nav"><button id="back-2" onclick="step(-1)">Back</button><span class="spacer"></span>
+      <button class="primary" id="next-2" onclick="step(1)">Continue</button></div>
+  </div>
+</section>
 
-<section id="s4" class="off"><h2>4. Start</h2>
-  <p>This stops the wizard and starts the dashboard on the same address.</p>
-  <button class="primary" id="b-finish" onclick="finish()">Open the dashboard</button>
-  <div class="status" id="st-s4" role="status" aria-live="polite" hidden></div></section>
+<section id="s3">
+  <h2>3. Train</h2>
+  <div class="summary"><span class="mark">&#10003;</span><span class="sum-text"></span><a href="#" onclick="goTo(2); return false;">Change</a></div>
+  <div class="body">
+    <p id="train-info"></p>
+    <button class="primary" id="b-train" onclick="train()">Train now</button>
+    <div class="status" id="st-s3" role="status" aria-live="polite" hidden></div>
+    <div class="nav"><button id="back-3" onclick="step(-1)">Back</button><span class="spacer"></span>
+      <button id="b-skip" onclick="skipTrain()">Skip training</button>
+      <button class="primary" id="next-3" onclick="step(1)">Continue</button></div>
+  </div>
+</section>
+
+<section id="s4">
+  <h2>4. Start</h2>
+  <div class="summary"><span class="mark">&#10003;</span><span class="sum-text"></span><a href="#" onclick="goTo(3); return false;">Change</a></div>
+  <div class="body">
+    <p id="start-info"></p>
+    <p>This stops the wizard and starts the dashboard on the same address.</p>
+    <button class="primary" id="b-finish" onclick="finish()">Open the dashboard</button>
+    <div class="status" id="st-s4" role="status" aria-live="polite" hidden></div>
+    <div class="nexttime">
+      <h3>Next time</h3>
+      <ul>
+        <li>Run <code id="cmd-run">predictor run --open</code><button class="small-btn" onclick="copyText('cmd-run', this)">Copy</button></li>
+        <li>or double-click <code>start.command</code> (macOS) or <code>start.bat</code> (Windows), or run <code>./start.sh</code> (Linux).
+            Once setup is done they go straight to the dashboard.</li>
+      </ul>
+      <p class="hint">The dashboard runs in the terminal window that started it. Press Ctrl+C there to stop it;
+      closing the window stops it too.</p>
+    </div>
+    <div class="nav"><button id="back-4" onclick="step(-1)">Back</button></div>
+  </div>
+</section>
 
 <pre id="log" hidden></pre>
 
 <script>
 const $ = id => document.getElementById(id);
 const NET = 'Cannot reach the wizard - is `predictor setup` still running?';
+const SECTIONS = ['s1', 's2', 's3', 's4'];
+const LABELS = ['Check', 'Demo data', 'Train', 'Start'];
 const JOBS = {  // what a running server-side job looks like on this page
   'demo-data': {button: 'b-demo-yes', section: 's2', label: 'Installing demo data ...'},
   'train': {button: 'b-train', section: 's3', label: 'Training ...'},
 };
 let status = null, busy = null, timer = null;
+let view = 'guided', current = null, steps = [];
+const ctx = {skippedTrain: false, failed: null};
+try { if (localStorage.getItem('setup-view') === 'all') view = 'all'; } catch (e) { /* no storage */ }
 
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
 const fmt = sec => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 const elapsed = () => Math.floor((Date.now() - busy.started) / 1000);
+
+// <computeSteps>
+// Pure: which steps are done, what each summary says, and whether "Continue" is allowed. No DOM access.
+function computeSteps(st, ctx) {
+  const ids = ['s1', 's2', 's3', 's4'];
+  const errors = st.findings.filter(f => f.level === 'error').length;
+  const warns = st.findings.filter(f => f.level === 'warn').length;
+  const s1 = st.has_errors
+    ? {state: 'problem', summary: `${errors} problem(s) to fix`, canContinue: false}
+    : {state: 'done', summary: warns ? `Passed with ${warns} warning(s)` : 'All checks passed', canContinue: true};
+
+  const present = st.demo_data.filter(d => d.present).length;
+  const onDisk = st.demo_data.length > 0 && present === st.demo_data.length;
+  const s2done = onDisk || st.demo_answer === false;
+  const s2 = {state: s2done ? 'done' : 'todo', canContinue: s2done,
+    summary: onDisk ? `Demo data installed (${present} sets)` : st.demo_answer === false ? 'Skipped: serve-only'
+      : 'Choose whether to install the demo data'};
+
+  const nothing = st.trainable.length === 0;
+  const s3done = s2done && (nothing || ctx.skippedTrain);  // not "done" before the question above is answered
+  const s3 = {state: s3done ? 'done' : 'todo', canContinue: s3done,
+    summary: !s2done ? 'Comes after the demo data step'
+      : nothing ? (st.trained.length ? `${st.trained.length} use case(s) have a model` : 'Nothing to train')
+      : ctx.skippedTrain ? 'Skipped training' : `${st.trainable.length} use case(s) to train`};
+
+  const s4 = {state: 'todo', canContinue: false,
+    summary: st.trained.length ? `${st.trained.length} use case(s) ready` : 'No trained models yet'};
+
+  const out = [s1, s2, s3, s4].map((s, i) => ({id: ids[i], ...s}));
+  if (ctx.failed !== null && out[ctx.failed]) out[ctx.failed].state = 'problem';
+  return out;
+}
+// The step to open: the first one that is not done (the last step is never done).
+function firstOpen(list) {
+  const i = list.findIndex(s => s.state !== 'done');
+  return i < 0 ? list.length - 1 : i;
+}
+// </computeSteps>
 
 // One request helper: network errors become a result instead of an exception nobody sees.
 async function api(method, url, body) {
@@ -99,18 +215,20 @@ async function api(method, url, body) {
 // ---- busy state: one job at a time, so one global state for the whole page
 function updateButtons() {
   document.querySelectorAll('button').forEach(b => {
-    b.disabled = !!busy || (b.id === 'b-train' && !(status && status.trainable.length));
+    b.disabled = !!busy || b.dataset.locked === '1' && b.closest('.stepper') === null
+      || (b.id === 'b-train' && !(status && status.trainable.length));
   });
 }
 
 function startBusy(button, section, label) {
   busy = {button, section, started: Date.now(), original: button.innerHTML, label};
+  ctx.failed = null;
   button.classList.add('busy');
   button.innerHTML = `<span class="spinner small"></span>${esc(label)}`;
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === section));
   const el = $('st-' + section);
   el.hidden = false; el.className = 'status';
-  el.innerHTML = '<span class="spinner"></span><span class="msg"></span><span class="elapsed">0:00</span><div class="bar"></div>';
+  el.innerHTML = '<span class="msg"></span><span class="elapsed">0:00</span><div class="bar"></div>';
   setMsg(label);
   updateButtons();
   clearInterval(timer);
@@ -138,7 +256,9 @@ function endBusy(ok, message) {
     el.innerHTML = `<span class="mark">${ok ? '&#10003;' : '&#10007;'}</span><span class="msg"></span>`;
     el.querySelector('.msg').textContent = message;
   }
+  if (!ok) ctx.failed = SECTIONS.indexOf(section);
   updateButtons();
+  render();
 }
 
 // ---- server-side jobs (demo data, train): poll until done, resolve with the final job state
@@ -179,6 +299,73 @@ async function runJob(button, section, label, start) {
   await load().catch(() => {});
 }
 
+// ---- the guide: render the stepper and decide which card is open
+function render() {
+  if (!status) return;
+  steps = computeSteps(status, ctx);
+  const reach = firstOpen(steps);
+  if (current === null || current > reach) current = reach;  // never stand past a step that is not done
+  document.body.classList.toggle('guided', view === 'guided');
+  document.body.classList.toggle('all', view === 'all');
+  $('toggle').textContent = view === 'guided' ? 'Show all steps' : 'Guide me step by step';
+
+  const ready = !status.has_errors;
+  const offs = [false, !ready, !ready || status.demo_answer === null && !status.trainable.length, !ready];
+  SECTIONS.forEach((id, i) => {
+    const s = steps[i];
+    const el = $(id);
+    el.classList.toggle('step-current', i === current);
+    el.classList.toggle('step-done', s.state === 'done' && i !== current);
+    el.classList.toggle('step-problem', s.state === 'problem');
+    el.classList.toggle('step-upcoming', s.state !== 'done' && s.state !== 'problem' && i !== current);
+    el.classList.toggle('off', view === 'all' && offs[i]);
+    el.querySelector('.sum-text').textContent = s.summary;
+  });
+
+  $('stepper').innerHTML = steps.map((s, i) => {
+    const cls = i === current ? 'current' : s.state === 'done' ? 'done' : s.state === 'problem' ? 'problem' : 'upcoming';
+    const locked = i > Math.max(reach, current) ? '1' : '0';
+    return `<li class="${cls}"><button type="button" data-locked="${locked}" onclick="goTo(${i})" ` +
+      `${i === current ? 'aria-current="step"' : ''}><span class="dot">${s.state === 'done' && i !== current ? '&#10003;' : i + 1}</span>` +
+      `<span class="label">${LABELS[i]}</span></button></li>`;
+  }).join('');
+
+  [1, 2, 3].forEach(n => { $('next-' + n).dataset.locked = steps[n - 1].canContinue ? '0' : '1'; });
+  $('b-skip').hidden = steps[2].state !== 'todo';
+  $('start-info').textContent = status.trained.length
+    ? `${status.trained.length} use case(s) are ready: ${status.trained.join(', ')}.`
+    : 'No use case has a trained model yet, so the dashboard will list them as "not trained".';
+  updateButtons();
+}
+
+function goTo(i) {
+  if (!steps.length || busy) return;
+  const reach = firstOpen(steps);
+  if (view === 'all') { $(SECTIONS[i]).scrollIntoView({behavior: 'smooth', block: 'start'}); return; }
+  if (i <= Math.max(reach, current)) { current = i; render(); }
+}
+function step(delta) {
+  const i = current + delta;
+  if (i < 0 || i >= SECTIONS.length || busy) return;
+  if (delta > 0 && !steps[current].canContinue) return;
+  current = i;
+  render();
+  $(SECTIONS[i]).scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+function skipTrain() { ctx.skippedTrain = true; render(); step(1); }
+function toggleView() {
+  view = view === 'guided' ? 'all' : 'guided';
+  try { localStorage.setItem('setup-view', view); } catch (e) { /* no storage */ }
+  render();
+}
+async function copyText(id, button) {
+  try {
+    await navigator.clipboard.writeText($(id).textContent);
+    button.textContent = 'Copied';
+  } catch (e) { button.textContent = 'Select and copy'; }
+  setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+}
+
 // ---- steps
 async function load() {
   const r = await api('GET', '/setup/api/status');
@@ -189,15 +376,11 @@ async function load() {
     (f.hint ? ` <span class="hint">&rarr; ${esc(f.hint)}</span>` : '') + '</li>').join('');
   $('datasets').innerHTML = status.demo_data.map(d =>
     `<li>${esc(d.id)}: ${esc(d.description)} <span class="hint">(${d.present ? 'on disk' : 'not fetched'})</span></li>`).join('');
-  const ready = !status.has_errors;
-  $('s2').classList.toggle('off', !ready);
-  $('s3').classList.toggle('off', !ready || status.demo_answer === null && !status.trainable.length);
-  $('s4').classList.toggle('off', !ready);
   $('demo-answer').textContent = status.demo_answer === null ? '' : (status.demo_answer ? 'answer: yes' : 'answer: no');
   $('train-info').textContent = status.trainable.length
     ? `Use cases ready to train: ${status.trainable.join(', ')}.`
     : 'Nothing to train (no untrained use case has its data here).';
-  updateButtons();
+  render();
 }
 
 async function check() {

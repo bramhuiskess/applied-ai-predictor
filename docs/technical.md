@@ -58,7 +58,7 @@ predictor doctor [--json]        # read-only check: manifests, dataset hashes, c
 predictor data fetch [ids]       # run the demo generators and write datasets/<id>/dataset.json
 predictor package build --out p  # bundle usecases + models (serve-only); --with-data adds the datasets; .tar.gz ok
 predictor package verify p       # offline check of a package folder or archive (sha256 per file)
-predictor run                    # doctor, then serve
+predictor run [--open]           # doctor, then serve; --open opens the browser when it is up
 predictor --home p run           # work in another folder (or PREDICTOR_HOME=p)
 ```
 
@@ -73,6 +73,16 @@ predictor --home p run           # work in another folder (or PREDICTOR_HOME=p)
 `dataset.json` is schema only. Linking a use case to a dataset by id belongs to the "adding datasets" backlog item and
 is not implemented. A package (`package.json` with a sha256 per file) is used like a project: `predictor --home <package> run`.
 The setup wizard only answers on localhost and is not part of `predictor serve`.
+
+**Starting.** `predictor run` is the start; setup configures and then starts. `run` checks the port first: a free port is
+used, a port held by a running predictor (its `/health` answers) is reused ("Already running", opened with `--open`), and a
+port held by something else moves on to the next free one. On a project that is already set up (no doctor errors and at
+least one trained model) `predictor setup` skips the wizard and does `run --open`; `--reconfigure` forces the wizard.
+The dashboard runs in the foreground terminal (Ctrl+C stops it); a background service or auto-start is not part of this.
+
+The wizard page is a guided, step-by-step view (stepper, one open card, Back/Continue/Skip) with a "Show all steps"
+toggle for the one-page layout. The step logic is the pure function `computeSteps` in `predictor/setup.html`, tested with
+node in `tests/test_setup_page.py`.
 
 ### Local development
 

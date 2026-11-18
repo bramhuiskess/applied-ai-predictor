@@ -149,6 +149,7 @@ if errorlevel 1 (
   echo Whenever you want it:
   echo   .venv\Scripts\activate
   echo   predictor setup        ^(guided, in the browser; add --cli for the terminal^)
+  echo   predictor run --open   ^(straight to the dashboard once setup is done^)
   goto finish
 )
 if "%DRY%"=="1" (

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from predictor import bootstrap
-from predictor.core.doctor import Finding, model_state, run_doctor
+from predictor.core.doctor import Finding, has_errors, model_state, run_doctor
 
 Log = Callable[[str], None]
 
@@ -24,6 +24,21 @@ def trainable() -> list[str]:
                 paths and all((bootstrap.home() / p).is_file() for p in paths):
             ids.append(manifest.use_case_id)
     return ids
+
+
+def trained() -> list[str]:
+    """Use cases that have a complete model."""
+    ids = []
+    for manifest in bootstrap.load_manifests():
+        version, problems = model_state(bootstrap.models_dir(), manifest.use_case_id)
+        if version is not None and not problems:
+            ids.append(manifest.use_case_id)
+    return ids
+
+
+def is_set_up() -> bool:
+    """Ready to just start: nothing wrong and at least one model to show."""
+    return not has_errors(doctor()) and bool(trained())
 
 
 def format_result(result: dict) -> list[str]:

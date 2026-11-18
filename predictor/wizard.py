@@ -77,11 +77,12 @@ def create_wizard_app(on_finish: Callable[[], None]) -> FastAPI:
         return HTMLResponse(files("predictor").joinpath("setup.html").read_text(encoding="utf-8"))
 
     @app.get("/setup/api/status")
-    def status() -> dict[str, Any]:
+    def status(request: Request) -> dict[str, Any]:
         findings = workflow.doctor()
         return {"findings": [f.as_dict() for f in findings], "has_errors": has_errors(findings),
                 "train_extra": installed_train_extra(), "demo_data": data_fetch.state(bootstrap.home()),
-                "demo_answer": answers["demo"], "trainable": _safe(workflow.trainable)}
+                "demo_answer": answers["demo"], "trainable": _safe(workflow.trainable),
+                "trained": _safe(workflow.trained), "port": request.url.port}
 
     @app.post("/setup/api/demo-data")
     def demo_data(answer: DemoAnswer) -> dict[str, Any]:

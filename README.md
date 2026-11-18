@@ -52,8 +52,14 @@ Handig: `--dry-run` (laat zien wat er zou gebeuren), `--yes --no-start` (zonder 
 . .venv/bin/activate                          # Windows: .venv\Scripts\activate
 predictor setup                               # begeleide installatie in de browser (localhost)
 predictor setup --cli --with-data --yes       # dezelfde stappen, volledig in de terminal
-predictor run                                 # controleert alles en start het dashboard
+predictor run --open                          # controleert alles, start het dashboard en opent de browser
 ```
+
+**Volgende keer starten:** dubbelklik `start.command` / `start.bat` (of `./start.sh`), of draai `predictor run --open`.
+Is alles al ingesteld, dan gaat `predictor setup` direct naar het dashboard; met `--reconfigure` doorloop je de
+stappen opnieuw. Het dashboard draait in het terminalvenster waarmee je het startte: stoppen kan met Ctrl+C.
+Staat poort 8000 al in gebruik door een draaiende predictor, dan opent `run --open` die; door iets anders, dan wordt
+de eerstvolgende vrije poort gebruikt.
 
 Kreeg je het project als zip? Dan is de uitvoerbaar-bit verloren en blokkeert macOS gedownloade scripts:
 klik rechts → Open, of draai `bash start.sh`. Een `git clone` heeft dit probleem niet.

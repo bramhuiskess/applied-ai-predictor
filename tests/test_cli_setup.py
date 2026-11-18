@@ -5,7 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from predictor import cli, data_fetch, wizard
+from predictor import cli, data_fetch, serving, wizard
 from test_dataset_manifest import make_dataset
 
 
@@ -66,13 +66,13 @@ def test_setup_terminal_flow_without_data_is_serve_only(project, capsys):
 def test_run_refuses_to_start_on_errors(project, capsys, monkeypatch):
     (project / "usecases" / "demo" / "manifest.json").write_text("{}")
     started = []
-    monkeypatch.setattr(cli, "_serve", lambda args: started.append(1) or 0)
+    monkeypatch.setattr(serving, "start", lambda *a, **k: started.append(1) or 0)
     assert cli.main(["run"]) == 1 and not started
 
 
 def test_run_starts_when_ready(project, monkeypatch):
     started = []
-    monkeypatch.setattr(cli, "_serve", lambda args: started.append(1) or 0)
+    monkeypatch.setattr(serving, "start", lambda *a, **k: started.append(1) or 0)
     assert cli.main(["run"]) == 0 and started
 
 
