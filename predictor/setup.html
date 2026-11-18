@@ -7,14 +7,37 @@
 <style>
   body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1d2733; }
   h1 { font-size: 1.5rem; } h2 { font-size: 1.05rem; margin: 0 0 .4rem; }
-  section { border: 1px solid #d6dde5; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; }
+  section { border: 1px solid #d6dde5; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; transition: border-color .15s, box-shadow .15s; }
   section.off { opacity: .45; pointer-events: none; }
+  section.active { border-color: #1f6feb; box-shadow: inset 3px 0 0 #1f6feb; }
   .ok { color: #1a7f37; } .warn { color: #9a6700; } .error { color: #cf222e; }
   li { margin: .15rem 0; } .hint { color: #57606a; }
   button { font: inherit; padding: .45rem 1rem; border-radius: 6px; border: 1px solid #8c959f; background: #f6f8fa; cursor: pointer; margin-right: .5rem; }
   button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.busy:disabled { opacity: 1; cursor: progress; }
   pre { background: #0d1117; color: #c9d1d9; padding: .7rem; border-radius: 6px; max-height: 14rem; overflow: auto; font-size: 12px; }
   code { background: #eef1f4; padding: 0 .25rem; border-radius: 3px; }
+
+  /* loading states */
+  .spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid #c8d1db; border-top-color: #1f6feb;
+             border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -.2em; flex: none; }
+  .spinner.small { width: .8rem; height: .8rem; margin-right: .45rem; border-color: currentColor; border-top-color: transparent; vertical-align: -.1em; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .75rem; font-size: 14px; }
+  .status .elapsed { margin-left: auto; color: #57606a; font-variant-numeric: tabular-nums; }
+  .status.done { color: #1a7f37; } .status.failed { color: #cf222e; }
+  .status .mark { font-weight: 700; }
+  .bar { flex-basis: 100%; height: 3px; background: #e6ebf1; border-radius: 2px; overflow: hidden; position: relative; }
+  .bar::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 35%; background: #1f6feb; border-radius: 2px;
+                animation: slide 1.3s ease-in-out infinite; }
+  @keyframes slide { 0% { left: -35%; } 100% { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; border-top-color: #1f6feb; }
+    .spinner.small { border-top-color: currentColor; }
+    .bar::after { animation: none; left: 0; width: 100%; opacity: .35; }
+    section { transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -22,36 +45,145 @@
 <p class="hint">Everything here can also be done in the terminal: <code>predictor setup --cli</code>, or the single commands
 <code>doctor</code>, <code>data fetch</code>, <code>train</code>, <code>run</code>.</p>
 
-<section id="s1"><h2>1. Check</h2><ul id="findings">Checking ...</ul>
-  <button onclick="load()">Check again</button></section>
+<section id="s1"><h2>1. Check</h2><ul id="findings"></ul>
+  <button id="b-check" onclick="check()">Check again</button>
+  <div class="status" id="st-s1" role="status" aria-live="polite" hidden></div></section>
 
 <section id="s2" class="off"><h2>2. Demo data</h2>
   <p>Install the demo data? It is needed to train the demo use cases; without it you can still serve existing models
   or add your own data later. Some sets are downloaded (KNMI, CBS, WUR; roughly 250 MB).</p>
   <ul id="datasets"></ul>
-  <button class="primary" onclick="demo(true)">Yes, install the demo data</button>
-  <button onclick="demo(false)">No, skip</button>
-  <span id="demo-answer" class="hint"></span></section>
+  <button class="primary" id="b-demo-yes" onclick="demo(true)">Yes, install the demo data</button>
+  <button id="b-demo-no" onclick="demo(false)">No, skip</button>
+  <span id="demo-answer" class="hint"></span>
+  <div class="status" id="st-s2" role="status" aria-live="polite" hidden></div></section>
 
 <section id="s3" class="off"><h2>3. Train</h2>
   <p id="train-info"></p>
-  <button class="primary" id="train-btn" onclick="train()">Train now</button></section>
+  <button class="primary" id="b-train" onclick="train()">Train now</button>
+  <div class="status" id="st-s3" role="status" aria-live="polite" hidden></div></section>
 
 <section id="s4" class="off"><h2>4. Start</h2>
   <p>This stops the wizard and starts the dashboard on the same address.</p>
-  <button class="primary" onclick="finish()">Open the dashboard</button></section>
+  <button class="primary" id="b-finish" onclick="finish()">Open the dashboard</button>
+  <div class="status" id="st-s4" role="status" aria-live="polite" hidden></div></section>
 
 <pre id="log" hidden></pre>
 
 <script>
 const $ = id => document.getElementById(id);
-let status = null, polling = false;
-const post = (url, body) => fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
-  body: body === undefined ? undefined : JSON.stringify(body)}).then(async r => ({ok: r.ok, data: await r.json()}));
-const esc = s => String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+const NET = 'Cannot reach the wizard - is `predictor setup` still running?';
+const JOBS = {  // what a running server-side job looks like on this page
+  'demo-data': {button: 'b-demo-yes', section: 's2', label: 'Installing demo data ...'},
+  'train': {button: 'b-train', section: 's3', label: 'Training ...'},
+};
+let status = null, busy = null, timer = null;
 
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+const fmt = sec => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+const elapsed = () => Math.floor((Date.now() - busy.started) / 1000);
+
+// One request helper: network errors become a result instead of an exception nobody sees.
+async function api(method, url, body) {
+  try {
+    const r = await fetch(url, {method, headers: body === undefined ? {} : {'Content-Type': 'application/json'},
+      body: body === undefined ? undefined : JSON.stringify(body)});
+    let data = {};
+    try { data = await r.json(); } catch (e) { /* no body */ }
+    return {ok: r.ok, data};
+  } catch (e) {
+    return {ok: false, network: true, data: {detail: NET}};
+  }
+}
+
+// ---- busy state: one job at a time, so one global state for the whole page
+function updateButtons() {
+  document.querySelectorAll('button').forEach(b => {
+    b.disabled = !!busy || (b.id === 'b-train' && !(status && status.trainable.length));
+  });
+}
+
+function startBusy(button, section, label) {
+  busy = {button, section, started: Date.now(), original: button.innerHTML, label};
+  button.classList.add('busy');
+  button.innerHTML = `<span class="spinner small"></span>${esc(label)}`;
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === section));
+  const el = $('st-' + section);
+  el.hidden = false; el.className = 'status';
+  el.innerHTML = '<span class="spinner"></span><span class="msg"></span><span class="elapsed">0:00</span><div class="bar"></div>';
+  setMsg(label);
+  updateButtons();
+  clearInterval(timer);
+  timer = setInterval(() => {
+    const e = document.querySelector('#st-' + busy.section + ' .elapsed');
+    if (e) e.textContent = fmt(elapsed());
+  }, 1000);
+}
+
+function setMsg(text) {
+  if (busy) document.querySelector('#st-' + busy.section + ' .msg').textContent = text;
+}
+
+// message === null hides the status line (nothing worth keeping, e.g. after "Check again").
+function endBusy(ok, message) {
+  clearInterval(timer);
+  const {button, section, original} = busy;
+  busy = null;
+  button.classList.remove('busy');
+  button.innerHTML = original;
+  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+  const el = $('st-' + section);
+  if (message === null) { el.hidden = true; } else {
+    el.className = 'status ' + (ok ? 'done' : 'failed');
+    el.innerHTML = `<span class="mark">${ok ? '&#10003;' : '&#10007;'}</span><span class="msg"></span>`;
+    el.querySelector('.msg').textContent = message;
+  }
+  updateButtons();
+}
+
+// ---- server-side jobs (demo data, train): poll until done, resolve with the final job state
+function showLog(lines) {
+  const log = $('log');
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+  log.hidden = false;
+  log.textContent = lines.join('\n');
+  if (atBottom) log.scrollTop = log.scrollHeight;  // do not yank the view while the user reads older lines
+}
+
+function follow() {
+  return new Promise(resolve => {
+    const tick = async () => {
+      const r = await api('GET', '/setup/api/job');
+      if (r.network) { resolve({state: 'failed', error: NET}); return; }
+      const j = r.data;
+      showLog(j.log.length ? j.log.concat(j.error ? ['FAILED: ' + j.error] : []) : ['Starting ...']);
+      if (busy) setMsg(j.log.length ? `${busy.label} (${j.log.length} log lines)` : busy.label);
+      if (j.state === 'running') { setTimeout(tick, 700); return; }
+      resolve(j);
+    };
+    tick();
+  });
+}
+
+async function runJob(button, section, label, start) {
+  startBusy(button, section, label);
+  showLog(['Starting ...']);
+  if (start) {
+    const r = await start();
+    if (!r.ok) { endBusy(false, r.data.detail || 'Could not start'); await load().catch(() => {}); return; }
+    // r.data.started === false: a job is already running; just follow that one
+  }
+  const j = await follow();
+  const took = fmt(elapsed());
+  endBusy(j.state === 'done', j.state === 'done' ? `Done in ${took}` : `Failed after ${took}: ${j.error || 'unknown error'}`);
+  await load().catch(() => {});
+}
+
+// ---- steps
 async function load() {
-  status = await (await fetch('/setup/api/status')).json();
+  const r = await api('GET', '/setup/api/status');
+  if (r.network) throw new Error(NET);
+  status = r.data;
   $('findings').innerHTML = status.findings.map(f =>
     `<li class="${f.level}"><b>${esc(f.level)}</b> ${esc(f.check)}: ${esc(f.message)}` +
     (f.hint ? ` <span class="hint">&rarr; ${esc(f.hint)}</span>` : '') + '</li>').join('');
@@ -65,44 +197,57 @@ async function load() {
   $('train-info').textContent = status.trainable.length
     ? `Use cases ready to train: ${status.trainable.join(', ')}.`
     : 'Nothing to train (no untrained use case has its data here).';
-  $('train-btn').disabled = !status.trainable.length;
+  updateButtons();
+}
+
+async function check() {
+  startBusy($('b-check'), 's1', 'Checking ...');
+  try { await load(); endBusy(true, null); } catch (e) { endBusy(false, e.message); }
 }
 
 async function demo(install) {
-  const r = await post('/setup/api/demo-data', {install});
-  if (!r.ok) { alert(r.data.detail); return; }
-  if (r.data.started) follow(); else load();
+  if (!install) {
+    startBusy($('b-demo-no'), 's2', 'Saving ...');
+    const r = await api('POST', '/setup/api/demo-data', {install: false});
+    endBusy(r.ok, r.ok ? 'Skipped: no demo data will be installed.' : (r.data.detail || 'Could not save the answer'));
+    await load().catch(() => {});
+    return;
+  }
+  await runJob($('b-demo-yes'), 's2', 'Installing demo data ...',
+               () => api('POST', '/setup/api/demo-data', {install: true}));
 }
+
 async function train() {
-  const r = await post('/setup/api/train');
-  if (!r.ok) { alert(r.data.detail); return; }
-  follow();
+  await runJob($('b-train'), 's3', 'Training ...', () => api('POST', '/setup/api/train'));
 }
-function follow() {
-  if (polling) return;
-  polling = true; $('log').hidden = false;
-  const tick = async () => {
-    const j = await (await fetch('/setup/api/job')).json();
-    $('log').textContent = j.log.join('\n') + (j.error ? '\nFAILED: ' + j.error : '');
-    $('log').scrollTop = 1e9;
-    if (j.state === 'running') { setTimeout(tick, 700); return; }
-    polling = false; load();
-  };
-  tick();
-}
+
 async function finish() {
-  await post('/setup/api/finish');
-  $('s4').innerHTML = '<h2>4. Start</h2><p>Starting the dashboard ...</p>';
+  startBusy($('b-finish'), 's4', 'Starting the dashboard ...');
+  const r = await api('POST', '/setup/api/finish');
+  if (!r.ok) { endBusy(false, r.data.detail || 'Could not start the dashboard'); return; }
+  const t0 = Date.now();
   const wait = async () => {
     try {
-      const r = await fetch('/health');
-      if (r.ok && (await r.json()).status === 'ok') { location = '/'; return; }
-    } catch (e) { /* server restarting */ }
+      const h = await fetch('/health');  // only the dashboard server answers this
+      if (h.ok && (await h.json()).status === 'ok') { location = '/'; return; }
+    } catch (e) { /* the server is switching over */ }
+    if (Date.now() - t0 > 60000) {
+      endBusy(false, 'This takes longer than expected. Check the terminal where you ran `predictor setup`.');
+      return;
+    }
     setTimeout(wait, 600);
   };
   setTimeout(wait, 800);
 }
-load();
+
+// ---- first load: show a spinner, then pick up a job that is already running (page reload)
+(async () => {
+  $('findings').innerHTML = '<li><span class="spinner small"></span>Checking ...</li>';
+  try { await load(); } catch (e) { $('findings').innerHTML = `<li class="error">${esc(e.message)}</li>`; return; }
+  const r = await api('GET', '/setup/api/job');
+  const spec = r.ok && r.data.state === 'running' ? JOBS[r.data.name] : null;
+  if (spec) await runJob($(spec.button), spec.section, spec.label, null);
+})();
 </script>
 </body>
 </html>
