@@ -36,6 +36,19 @@ docker run --rm -p 8000:8000 applied-ai-predictor     # dashboard on http://loca
 The image is built in two stages. Training happens in the first stage; the serving image
 contains **no pandas, scikit-learn or LightGBM**, only the ONNX runtime.
 
+### One-click launchers
+
+`start.command` / `start.sh` (macOS, Linux) and `start.bat` (Windows) do what `scripts/setup.sh` did, plus: they look
+for a Python >= 3.11 (preferred version from `.python-version`), and when there is none they ask before installing
+`uv` into `~/.local/bin` (`%USERPROFILE%\.local\bin`; `UV_NO_MODIFY_PATH=1`, so no shell profile is edited) and let it
+download Python for `.venv` only. Then they install the project (skipped when `pyproject.toml` and the extras did not
+change: `.venv/.installed`) and ask "Open the dashboard now?", which runs `predictor setup`.
+
+Flags: `--yes`, `--no-start`, `--minimal`, `--extras LIST`, `--dry-run`, `--help`. Exit codes: 0 ok, 1 no Python and none
+installed, 2 an install step failed. `scripts/setup.sh` is a wrapper for `start.sh --no-start`. `start.sh` is tested in
+`tests/test_launcher.py` (dry run on a controlled `PATH`); `start.bat` only gets static checks there and has to be run
+by a person on Windows.
+
 ### Setup and the application package
 
 ```bash

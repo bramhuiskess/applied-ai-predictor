@@ -34,14 +34,29 @@ docker run --rm -p 8000:8000 applied-ai-predictor
 Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
 http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
-Zonder Docker kan ook (vereist Python 3.11+):
+Zonder Docker: open één bestand, het zoekt zelf een geschikte Python (3.11+), maakt `.venv` en biedt aan het
+dashboard te openen:
+
+| Systeem | Doe dit |
+|---|---|
+| macOS | dubbelklik `start.command` (of `./start.sh`) |
+| Linux | `./start.sh` |
+| Windows | dubbelklik `start.bat` |
+
+Is er geen geschikte Python, dan vraagt het script toestemming om er een te installeren met
+[uv](https://docs.astral.sh/uv/) (in je homefolder, zonder beheerdersrechten, het systeem-Python blijft ongemoeid).
+Handig: `--dry-run` (laat zien wat er zou gebeuren), `--yes --no-start` (zonder vragen, voor scripts), `--minimal`
+(zonder trainingsbibliotheken). Na het starten kan alles ook in de terminal:
 
 ```bash
-./scripts/setup.sh && . .venv/bin/activate   # of: uv sync
+. .venv/bin/activate                          # Windows: .venv\Scripts\activate
 predictor setup                               # begeleide installatie in de browser (localhost)
 predictor setup --cli --with-data --yes       # dezelfde stappen, volledig in de terminal
 predictor run                                 # controleert alles en start het dashboard
 ```
+
+Kreeg je het project als zip? Dan is de uitvoerbaar-bit verloren en blokkeert macOS gedownloade scripts:
+klik rechts → Open, of draai `bash start.sh`. Een `git clone` heeft dit probleem niet.
 
 Standaard is het "serve-only": zonder `--with-data` wordt er geen democdata opgehaald. Wat je nodig hebt en hoe je
 een pakket bouwt staat in [`docs/technical.md`](docs/technical.md).
