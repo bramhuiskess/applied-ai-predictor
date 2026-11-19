@@ -99,7 +99,7 @@ SOURCES: dict[str, Callable[[Path], "pd.DataFrame"]] = {
 EXTENSIONS = {".csv": "csv-file", ".json": "json-file", ".jsonl": "jsonl-file", ".ndjson": "jsonl-file", ".parquet": "parquet-file"}
 
 
-def read_table(adapter: str, path: Path) -> pd.DataFrame:
+def read_table(adapter: str, path: Path, *, allow_empty: bool = False) -> pd.DataFrame:
     try:
         reader = SOURCES[adapter]
     except KeyError:
@@ -108,7 +108,7 @@ def read_table(adapter: str, path: Path) -> pd.DataFrame:
     if path.stat().st_size == 0:
         raise ValueError(f"{path}: the file is empty")
     df = reader(path)
-    if df.empty:
+    if df.empty and not allow_empty:
         raise ValueError(f"{path}: the file contains no records")
     return df
 
