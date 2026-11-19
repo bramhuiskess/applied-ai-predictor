@@ -158,6 +158,45 @@ def test_flattening_that_would_overwrite_a_value_is_refused(records):
         read_jsonl_stream(io.StringIO("\n".join(json.dumps(r) for r in records)))
 
 
+def test_invalid_json_file_is_reported_with_its_path_and_position(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text('[{"a": 1},')
+    with pytest.raises(ValueError, match=r"bad\.json: not valid JSON \(line 1, column"):
+        read_table("json-file", path)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_numbers_are_refused_in_json_and_jsonl(tmp_path, constant):
+    jsonl = tmp_path / "x.jsonl"
+    jsonl.write_text('{"a": 1}\n{"a": ' + constant + "}\n")
+    with pytest.raises(ValueError, match=f"line 2 .*{constant} is not allowed"):
+        read_table("jsonl-file", jsonl)
+    plain = tmp_path / "x.json"
+    plain.write_text('[{"a": ' + constant + "}]")
+    with pytest.raises(ValueError, match=f"{constant} is not allowed"):
+        read_table("json-file", plain)
+
+
+@pytest.mark.parametrize("records", [
+    [{"a": {"x": 1}}, {"a": None}],
+    [{"a": None}, {"a": {"x": 1}}],
+])
+def test_null_where_other_records_have_an_object_adds_no_extra_column(records):
+    table = read_jsonl_stream(io.StringIO("\n".join(json.dumps(r) for r in records)))
+    assert list(table.columns) == ["a_x"]
+    assert table["a_x"].isna().sum() == 1
+
+
+def test_a_stream_of_bytes_is_decoded():
+    stream = io.BytesIO(b'\xef\xbb\xbf{"a": 1}\r\n{"a": 2}\r\n')
+    assert read_jsonl_stream(stream)["a"].tolist() == [1, 2]
+
+
+def test_bytes_that_are_not_utf8_are_refused_with_the_line_number():
+    with pytest.raises(ValueError, match="line 2 is not valid UTF-8"):
+        read_jsonl_stream(io.BytesIO(b'{"a": 1}\n\xff\xfe\n'))
+
+
 FEATURES = {"pump_type": "A", "vibration_mm_s": 3.0, "pressure_bar": 6.0, "filter_ok": 1}
  
  
