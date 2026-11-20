@@ -365,6 +365,20 @@ def test_check_joins_cli_suggests_joins_and_survives_missing_files(nursery, tmp_
     assert "cannot check" in capsys.readouterr().err
 
 
+def test_a_header_only_lookup_is_reported_by_check_joins_not_crashed_on(nursery, tmp_path, capsys):
+    from predictor.cli import main
+
+    broken = json.loads(json.dumps(nursery["manifest"]))
+    for index, join in enumerate(broken["joins"]):
+        source = Path(join["source"]["path"])
+        header_only = tmp_path / f"lookup{index}.csv"
+        header_only.write_text(source.read_text().splitlines()[0] + "\n")
+        join["source"]["path"] = str(header_only)
+    path = write(tmp_path, broken)
+    assert main(["check-joins", str(path / "manifest.json")]) == 1 
+    assert "lookup table has no rows" in capsys.readouterr().out
+
+
 def test_a_missing_key_column_is_not_reported_as_an_empty_table(nursery, tmp_path, capsys):
     from predictor.cli import main
 
