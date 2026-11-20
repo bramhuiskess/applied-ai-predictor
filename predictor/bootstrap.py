@@ -18,6 +18,16 @@ from predictor.core.service import PredictionService
 RUNNERS = {"onnx": OnnxRunner}
 
 
+def home() -> Path:
+    """The project (or package) folder. ``predictor --home DIR`` / PREDICTOR_HOME changes into it at start-up,
+    so this is always the current directory and the relative paths in the manifests resolve against it."""
+    return Path(".")
+
+
+def datasets_dir() -> Path:
+    return Path(os.environ.get("PREDICTOR_DATASETS_DIR", "datasets"))
+
+
 def usecases_dir() -> Path:
     return Path(os.environ.get("PREDICTOR_USECASES_DIR", "usecases"))
 

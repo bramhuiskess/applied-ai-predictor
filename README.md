@@ -34,7 +34,38 @@ docker run --rm -p 8000:8000 applied-ai-predictor
 Open daarna http://localhost:8000 voor het dashboard (grafieken + live voorspellen),
 http://localhost:8000/docs voor de API, of draai `./scripts/demo.sh` voor de demo in de terminal.
 
-Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/technical.md`](docs/technical.md).
+Zonder Docker: open één bestand, het zoekt zelf een geschikte Python (3.11+), maakt `.venv` en biedt aan het
+dashboard te openen:
+
+| Systeem | Doe dit |
+|---|---|
+| macOS | dubbelklik `start.command` (of `./start.sh`) |
+| Linux | `./start.sh` |
+| Windows | dubbelklik `start.bat` |
+
+Is er geen geschikte Python, dan vraagt het script toestemming om er een te installeren met
+[uv](https://docs.astral.sh/uv/) (in je homefolder, zonder beheerdersrechten, het systeem-Python blijft ongemoeid).
+Handig: `--dry-run` (laat zien wat er zou gebeuren), `--yes --no-start` (zonder vragen, voor scripts), `--minimal`
+(zonder trainingsbibliotheken). Na het starten kan alles ook in de terminal:
+
+```bash
+. .venv/bin/activate                          # Windows: .venv\Scripts\activate
+predictor setup                               # begeleide installatie in de browser (localhost)
+predictor setup --cli --with-data --yes       # dezelfde stappen, volledig in de terminal
+predictor run --open                          # controleert alles, start het dashboard en opent de browser
+```
+
+**Volgende keer starten:** dubbelklik `start.command` / `start.bat` (of `./start.sh`), of draai `predictor run --open`.
+Is alles al ingesteld, dan gaat `predictor setup` direct naar het dashboard; met `--reconfigure` doorloop je de
+stappen opnieuw. Het dashboard draait in het terminalvenster waarmee je het startte: stoppen kan met Ctrl+C.
+Staat poort 8000 al in gebruik door een draaiende predictor, dan opent `run --open` die; door iets anders, dan wordt
+de eerstvolgende vrije poort gebruikt.
+
+Kreeg je het project als zip? Dan is de uitvoerbaar-bit verloren en blokkeert macOS gedownloade scripts:
+klik rechts → Open, of draai `bash start.sh`. Een `git clone` heeft dit probleem niet.
+
+Standaard is het "serve-only": zonder `--with-data` wordt er geen democdata opgehaald. Wat je nodig hebt en hoe je
+een pakket bouwt staat in [`docs/technical.md`](docs/technical.md).
 
 ## Wat kan het nu
 

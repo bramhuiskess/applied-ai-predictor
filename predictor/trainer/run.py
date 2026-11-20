@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import platform
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from predictor.adapters.fs_registry import FilesystemRegistry, PublishedOutput
 from predictor.adapters.sources import adapter_for, read_table
 from predictor.core import ranges
 from predictor.core.certainty import SupportIndex, build_support, certainty
+from predictor.core.dataset import sha256_file
 from predictor.core.manifest import ALGORITHMS, MANIFEST_FILENAME, Manifest, TrainingConfig, load_manifest
 from predictor.trainer import models
 from predictor.trainer.export import check_parity, make_thresholds_float32_safe, to_onnx
@@ -232,7 +232,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
                                          split.test, manifest.policy.evaluation_rows_allowed),
         "notes": data.notes,
-        "dataset": {"path": str(source), "rows": base_rows, "sha256": _sha256(source),
+        "dataset": {"path": str(source), "rows": base_rows, "sha256": sha256_file(source),
                     **({"rows_after_joins": int(len(df))} if joined else {})},
         "joins": joined.summary if joined else [],
         **({"joins_example": _joins_example(joined, df)} if joined and joined.engine and manifest.policy.evaluation_rows_allowed else {}),
@@ -710,14 +710,6 @@ def _leakage_suspects(data, X_train, y_train, horizon_source: str | None) -> lis
         elif data.task == "regression" and abs(x.corr(y_train)) >= 0.99:
             suspects.append(spec.name)
     return suspects
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _environment() -> dict[str, str]:
