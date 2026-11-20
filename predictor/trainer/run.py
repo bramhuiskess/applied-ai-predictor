@@ -76,6 +76,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         data.notes[:0] = joined.notes
     task = data.task
     feature_names = [f.name for f in data.features]
+    categories = category_counts(data.features)
     monotone = _scenario_constraints(manifest, data, cfg.target)
     bounds = ((cfg.target_min, cfg.target_max)
               if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None) else None)
@@ -130,23 +131,34 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
     excluded: dict[str, list[str]] = {}
-    for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone, allowed).items():
+    setting = _threshold_setting(task, data, cfg)
+    for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone, allowed, categories).items():
         unseen = None   # (rows, true values, predictions) the candidate did not learn from: calibrates the range
+        threshold, threshold_note = setting
         if fit_groups is not None:
-            val_metrics, out_of_fold = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds, True)
+            if threshold == "auto":
+                threshold, threshold_note = 0.5, "0.5: not tuned when the model is chosen by cross-validation over groups"
+            val_metrics, out_of_fold = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds, True,
+                                                               threshold)
             unseen = (X_fit, y_fit, out_of_fold)
         else:
             pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
             make_thresholds_float32_safe(pipeline)
-            val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds)
+            if threshold == "auto":
+                costs = cfg.error_costs.model_dump() if cfg.error_costs else None
+                threshold, threshold_note = models.choose_threshold(
+                    y_val, pipeline.predict_proba(X_val.to_numpy(dtype="float32"))[:, 1], costs)
+            if name == "blend":
+                _choose_blend_weight(pipeline, X_val, y_val, bounds)
+            val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds, threshold)
             if task == "regression":
                 unseen = (X_val, y_val, _bounded(pipeline.predict(X_val.to_numpy(dtype="float32")), bounds))
         candidate = pipeline
         final = clone(pipeline).fit(X_fit.to_numpy(dtype="float32"), y_fit)
         make_thresholds_float32_safe(final)
-        test_metrics = models.evaluate(task, final, X_test, y_test, label_test, bounds)
+        test_metrics = models.evaluate(task, final, X_test, y_test, label_test, bounds, threshold)
         results[name] = {"model": final, "validation": val_metrics, "test": test_metrics, "unseen": unseen,
-                         "pipeline": candidate}
+                         "pipeline": candidate, "threshold": threshold, "threshold_note": threshold_note}
         violations = models.effect_violations(final, feature_names, monotone)
         if violations:
             # A scenario model must respect what the manifest declares, so it cannot win.
@@ -169,13 +181,13 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     new_group = None
     published, X_published = chosen["model"], X_fit
     if cfg.test_blocks:
-        pipeline = models.candidates(task, cfg.anomaly_share, monotone, [best_name])[best_name]
+        pipeline = clone(chosen["pipeline"])  # the same candidate, settings chosen on validation included
         if data.groups is not None and data.groups.nunique() >= 3:
             # The harder question next to it: a site the model has never seen (each site left out in turn).
             new_group = {"column": cfg.test_blocks.group, "groups": int(data.groups.nunique()),
                          "metrics": None}
             new_group["metrics"], new_predictions = _group_cross_validation(task, pipeline, data.X, data.y, data.groups,
-                                                                            bounds, True)
+                                                                            bounds, True, chosen["threshold"])
             if new_predictions is not None:
                 chosen["new_group_errors"] = np.abs(data.y.to_numpy(dtype=float) - new_predictions).tolist()
         published = clone(pipeline).fit(data.X.to_numpy(dtype="float32"), data.y)
@@ -212,6 +224,11 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
                           if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None)
                           else None),
         "classes": data.classes,
+        # The blend's share of the linear model (the rest is LightGBM), chosen on the validation split.
+        "blend_weight": (_blend_weight(published) if best_name == "blend" else None),
+        # Yes/no outputs: "yes" from this probability on (null: the class with the highest probability).
+        "decision_threshold": chosen["threshold"],
+        "decision_threshold_note": chosen["threshold_note"],
         "features": feature_names,
         "metrics": chosen["test"],
         "candidates": {n: {"validation": r["validation"], "test": r["test"]} for n, r in results.items()},
@@ -230,7 +247,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
                                         if fit_groups is not None else "hold-out")},
         "new_group": new_group,
         "evaluation": _evaluation_sample(data, chosen["model"], X_train, X_test, y_test, label_test,
-                                         split.test, manifest.policy.evaluation_rows_allowed),
+                                         split.test, manifest.policy.evaluation_rows_allowed, chosen["threshold"]),
         "notes": data.notes,
         "dataset": {"path": str(source), "rows": base_rows, "sha256": _sha256(source),
                     **({"rows_after_joins": int(len(df))} if joined else {})},
@@ -307,6 +324,47 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     report_path = registry.root / manifest.use_case_id / version / "report.md"
     report_path.write_text(render_report(manifest, described[first_name], described), encoding="utf-8")
     return {**described[first_name], "report": str(report_path), "outputs": described}
+
+
+BLEND_WEIGHTS = (0.2, 0.35, 0.5, 0.65, 0.8)   # the linear model's share in the blend
+MIN_BLEND_GAIN = 0.01                          # leave 50/50 only for at least 1% lower validation MAE
+
+
+def _choose_blend_weight(pipeline, X_val: pd.DataFrame, y_val: pd.Series, bounds: tuple | None) -> float:
+    """Set the blend's mix of the linear model and LightGBM to what works best on the validation rows.
+
+    Both parts are already fitted, so this only re-weights their predictions. Any mix of two models that obey the
+    declared effects obeys them too. The share stays 0.5 unless another is clearly better (`MIN_BLEND_GAIN`).
+    """
+    blend = pipeline.named_steps["model"]
+    X = pipeline[:-1].transform(X_val.to_numpy(dtype="float32"))
+    linear, trees = (part.predict(X) for part in blend.estimators_)
+    truth = np.asarray(y_val, dtype=float)
+    mae = {w: float(np.mean(np.abs(_bounded(w * linear + (1 - w) * trees, bounds) - truth))) for w in BLEND_WEIGHTS}
+    best = min(BLEND_WEIGHTS, key=lambda w: (mae[w], abs(w - 0.5)))
+    if mae[best] > (1 - MIN_BLEND_GAIN) * mae[0.5]:
+        best = 0.5
+    pipeline.set_params(model__weights=np.array([best, 1 - best]))   # an array: the ONNX converter sums it
+    return best
+
+
+def _blend_weight(pipeline) -> float:
+    weights = pipeline.named_steps["model"].weights
+    return float(weights[0]) if weights is not None else 0.5
+
+
+def _threshold_setting(task: str, data, cfg: TrainingConfig) -> tuple[float | str | None, str | None]:
+    """The yes/no cutoff to use: a number from the manifest, "auto" (choose on validation), or None (not yes/no)."""
+    if task != "classification" or len(data.classes or []) != 2:
+        return None, None
+    if cfg.decision_threshold != "auto":
+        return float(cfg.decision_threshold), f"{float(cfg.decision_threshold):g}: fixed in the manifest"
+    return "auto", None
+
+
+def category_counts(features) -> list[int]:
+    """The number of categories of every input (0 for numbers, integers and yes/no), for the linear models."""
+    return [len(f.categories or []) if f.kind == "categorical" else 0 for f in features]
 
 
 def _encoding(schema: dict[str, Any]) -> dict[str, Any]:
@@ -448,7 +506,9 @@ def render_report(manifest: Manifest, d: dict[str, Any], outputs: dict[str, dict
 def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
     lines = [
         f"- Task: **{d['task_type']}**" + (f", target `{d['target_name']}`" if d.get("target_name") else ""),
-        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on "
+        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}**"
+        + (f" ({d['blend_weight']:.0%} linear, {1 - d['blend_weight']:.0%} LightGBM)"
+           if d.get("blend_weight") is not None else "") + " (selected on "
         + (f"{d['split']['validation_method']} cross-validation" if d["split"].get("validation_method", "hold-out") != "hold-out"
            else "the validation split") + f", then retrained on {d['split'].get('published_on', 'train + validation')})",
         f"- Data: {d['dataset']['rows']} rows from `{d['dataset']['path']}`; split train/validation/test = "
@@ -460,6 +520,8 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
            else f" (backtest: test from {d['split']['test_from']})" if d["split"].get("test_from")
            else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
+        *([f"- Yes/no cutoff: the answer is \"{d['classes'][1]}\" from a probability of {d['decision_threshold_note']}"]
+          if d.get("decision_threshold") is not None and d.get("decision_threshold_note") else []),
         *_new_group_lines(d),
         *_range_lines(d),
         "",
@@ -517,7 +579,8 @@ def _range_lines(d: dict[str, Any]) -> list[str]:
     widths = (", ".join(f"{name} certainty ±{w:.4g}" for name, w in r["by_certainty"].items()) if r.get("by_certainty")
               else f"±{r['half_width']:.4g}")
     lines = [f"- {r['level']:.0%} range around a prediction: {widths}{unit} (measured on {r['calibration_rows']} rows the model "
-             f"did not learn from); on the test rows **{r['test_coverage']:.0%}** fell inside"]
+             f"did not learn from); on the test rows **{r['test_coverage']:.0%}** fell inside"
+             + (f", {r['test_mean_width']:.4g}{unit} wide on average" if r.get("test_mean_width") is not None else "")]
     if r.get("new_group_half_width") is not None:
         lines.append(f"- Low certainty is at least as wide as the error on a {d['new_group']['column']} the model never saw "
                      f"(±{r['new_group_half_width']:.4g}{unit}); outside the training range of an input no range is given")
@@ -536,7 +599,7 @@ def _new_group_lines(d: dict[str, Any]) -> list[str]:
 
 
 def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, groups: pd.Series,
-                            bounds: tuple | None, with_predictions: bool = False):
+                            bounds: tuple | None, with_predictions: bool = False, threshold: float | None = None):
     """Average metrics over folds that each leave one group (greenhouse, farm) out.
 
     With `with_predictions` also the prediction for every row from the model that did not see its group.
@@ -546,7 +609,7 @@ def _group_cross_validation(task: str, pipeline, X: pd.DataFrame, y: pd.Series, 
     for group in groups.unique():
         held = (groups == group).to_numpy()
         model = clone(pipeline).fit(X[~held].to_numpy(dtype="float32"), y[~held])
-        folds.append(models.evaluate(task, model, X[held], y[held], None, bounds))
+        folds.append(models.evaluate(task, model, X[held], y[held], None, bounds, threshold))
         if with_predictions and task == "regression":
             out_of_fold[held] = _bounded(model.predict(X[held].to_numpy(dtype="float32")), bounds)
     metrics = {k: float(np.mean([f[k] for f in folds])) for k in folds[0]}
@@ -581,10 +644,11 @@ def _range(chosen: dict[str, Any], support: dict[str, Any] | None, X_test: pd.Da
     test_levels = levels(X_test, own_rows=test_in_support)
     widths = np.array([ranges.half_width(spec, lv) for lv in (test_levels or [None] * len(test_errors))])
     spec["test_coverage"] = round(float(np.mean(test_errors <= widths)), 4)
+    spec["test_mean_width"] = round(float(2 * np.mean(widths)), 6)   # high - low, averaged over the test rows
     if test_levels and "by_certainty" in spec:
         spec["test_coverage_by_certainty"] = {
             name: {"rows": int(sum(lv == name for lv in test_levels)),
-                   "coverage": round(float(np.mean(test_errors[[lv == name for lv in test_levels]] <= ranges.half_width(spec, name))), 4)}
+                   "coverage": round(float(np.mean((test_errors <= widths)[[lv == name for lv in test_levels]])), 4)}
             for name in ("low", "medium", "high") if any(lv == name for lv in test_levels)}
     return spec
 
@@ -611,7 +675,7 @@ def _joins_section(joins: list[dict[str, Any]] | None) -> list[str]:
 
 
 def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_index,
-                       rows_allowed: bool) -> dict[str, Any]:
+                       rows_allowed: bool, threshold: float | None = None) -> dict[str, Any]:
     """A small, chart-ready summary of how the chosen model does on the test split.
 
     Row-level samples (actual vs. predicted, anomaly scores) are withheld unless the
@@ -621,7 +685,7 @@ def _evaluation_sample(data, model, X_train, X_test, y_test, label_test, test_in
     X = X_test.to_numpy(dtype="float32")
     sample: dict[str, Any] = {"example_input": _typical_input(data.features, X_train), "samples_withheld": None}
     if data.task == "classification":
-        pred = model.predict(X)
+        pred = models.predict_labels(model, X, threshold)
         n = len(data.classes)
         matrix = [[0] * n for _ in range(n)]
         for actual, predicted in zip(y_test, pred):

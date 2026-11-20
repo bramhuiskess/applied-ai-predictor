@@ -142,9 +142,10 @@ class PredictionService:
             "target_name": descriptor.get("target_name"),
             "target_unit": descriptor.get("target_unit"),
             "classes": descriptor.get("classes"),
+            "decision_threshold": descriptor.get("decision_threshold"),
             "metrics": descriptor.get("metrics"),
             "trained_at": descriptor.get("trained_at"),
-            "outputs": {name: _summary(om.descriptor, "classes", "metrics", "trained_at")
+            "outputs": {name: _summary(om.descriptor, "classes", "decision_threshold", "metrics", "trained_at")
                         for name, om in uc.model.outputs.items()},
             "inputs": [
                 {
@@ -304,14 +305,6 @@ class PredictionService:
         if problems:
             raise RequestRejected(problems, detail="invalid scenario request")
 
-        plans = planning.grid(scenario, levers)
-        requested = [{"name": f"plan {i + 1}", "changes": {k: {"set": v} for k, v in plan.items()}} for i, plan in enumerate(plans)]
-        resolved = self._resolve(uc, base.get("features"), requested)
-        rows = [resolved.base] + [s.features for s in resolved.scenarios]
-        outputs = self._outputs(uc, rows)
-        sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure, rows)
-        self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         properties = uc.model.feature_schema["properties"]
 
         def score(comparison: dict[str, Any]) -> float:
@@ -320,16 +313,63 @@ class PredictionService:
             change = comparison["outputs"][objective["output"]].get("change", 0.0)
             return float(change if objective["goal"] == "highest" else -change)
 
-        candidates, low_certainty, outside = [], 0, 0
-        for plan, s, out, c in zip(plans, resolved.scenarios, outputs[1:], sure[1:]):
-            comparison = compare(scenario, descriptors, resolved.base, outputs[0], s.features, out)
-            beyond = ranges.outside_training(properties, s.features)
-            level = c["level"] if c else None
-            ok = planning.allowed(level, min_certainty) and not beyond
-            low_certainty += not planning.allowed(level, min_certainty)
-            outside += bool(beyond)
-            candidates.append({"plan": plan, "scenario": s, "out": out, "certainty": c, "score": score(comparison),
-                               "comparison": comparison, "ok": ok})
+        counts = {"plans": 0, "refined": 0, "low_certainty": 0, "outside": 0}
+        first: dict[str, Any] = {}   # the first batch: its base row and outputs are the "now" every plan is compared with
+        logged: list[dict[str, Any]] = []
+
+        def evaluate(plans: list[dict[str, float]]) -> list[dict[str, Any]]:
+            """Calculate plans with the scenario engine, in one batch, and score them against the base."""
+            requested = [{"name": f"plan {counts['plans'] + i + 1}", "changes": {k: {"set": v} for k, v in plan.items()}}
+                         for i, plan in enumerate(plans)]
+            resolved = self._resolve(uc, base.get("features"), requested)
+            rows = [resolved.base] + [s.features for s in resolved.scenarios]
+            outputs = self._outputs(uc, rows)
+            sure = self._certainty(uc, rows)
+            self._add_ranges(uc, outputs, sure, rows)
+            if not first:
+                first.update(resolved=resolved, outputs=outputs, sure=sure)
+                logged.append(resolved.base)
+            logged.extend(rows[1:])
+            found = []
+            for plan, s, out, c in zip(plans, resolved.scenarios, outputs[1:], sure[1:]):
+                comparison = compare(scenario, descriptors, first["resolved"].base, first["outputs"][0], s.features, out)
+                beyond = ranges.outside_training(properties, s.features)
+                level = c["level"] if c else None
+                ok = planning.allowed(level, min_certainty) and not beyond
+                counts["low_certainty"] += not planning.allowed(level, min_certainty)
+                counts["outside"] += bool(beyond)
+                found.append({"plan": plan, "scenario": s, "out": out, "certainty": c, "score": score(comparison),
+                              "comparison": comparison, "ok": ok})
+            counts["plans"] += len(plans)
+            return found
+
+        candidates = evaluate(planning.grid(scenario, levers))
+        # Where the grid had to be coarse, look between its values around the best plans (see `core.plan`).
+        coarse = planning.coarse_levers(scenario, levers)
+        if coarse:
+            known = {planning.plan_key(item["plan"]): item for item in candidates}
+            grid_size = counts["plans"]
+            starts = sorted((item for item in candidates if item["ok"]), key=lambda item: -item["score"])
+            for current in starts[:planning.REFINE_STARTS]:
+                for _ in range(planning.REFINE_ROUNDS):
+                    improved = False
+                    for lever, gap in coarse.items():
+                        options = planning.neighbours(scenario, current["plan"], lever, gap)
+                        new = [p for p in options if planning.plan_key(p) not in known]
+                        if new:
+                            for item in evaluate(new):
+                                known[planning.plan_key(item["plan"])] = item
+                                candidates.append(item)
+                        nearby = [known[planning.plan_key(p)] for p in options if known[planning.plan_key(p)]["ok"]]
+                        better = max(nearby, key=lambda item: item["score"], default=None)
+                        if better is not None and better["score"] > current["score"] + 1e-12:
+                            current, improved = better, True
+                    if not improved:
+                        break
+            counts["refined"] = counts["plans"] - grid_size
+        resolved, outputs, sure = first["resolved"], first["outputs"], first["sure"]
+        self._monitor(uc, started, predicted=len(logged), rejected=0, warnings=0, rows=logged)
+        low_certainty, outside = counts["low_certainty"], counts["outside"]
         candidates.sort(key=lambda item: -item["score"])
         trusted = [item for item in candidates if item["ok"]]
 
@@ -365,7 +405,8 @@ class PredictionService:
             **self._header(uc),
             "objective": objective or {"output": "net_eur", "goal": "highest"},
             "levers": levers,
-            "searched": {"plans": len(plans), "trusted": len(trusted), "left_out_low_certainty": int(low_certainty),
+            "searched": {"plans": counts["plans"], "refined": counts["refined"], "refined_levers": list(coarse),
+                         "trusted": len(trusted), "left_out_low_certainty": int(low_certainty),
                          "left_out_outside_training_data": int(outside), "min_certainty": min_certainty,
                          "min_gain": round(threshold, 4), "typical_error": round(typical, 4) if typical else None},
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,

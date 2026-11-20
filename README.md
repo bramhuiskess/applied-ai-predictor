@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 431 tests, die draaien ook op GitHub Actions
+- 443 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -63,7 +63,7 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
   Eén scenario geeft ook het **nettoresultaat in euro's**: oogst min stook- en stroomkosten, met de eigen prijzen
   van de teler ("1 graad warmer: oogst +€0,41, stoken −€0,44, netto −€0,08 per m²"). En het systeem zoekt zelf
   het **beste plan** (`/scenario/best`): alle instellingen doorrekenen en het plan met het hoogste nettoresultaat
-  voorstellen. In de simulator levert het advies opvolgen +€2,03 per m² op (70% van wat achteraf maximaal kon)
+  voorstellen. In de simulator levert het advies opvolgen +€2,09 per m² op (73% van wat achteraf maximaal kon)
 - **eindtest op een ander jaar** (4e Greenhouse Challenge, 2024, nergens op afgesteld): de stook- en stroommodellen
   haalden het daar niet. Daarna gefixt: het stroommodel krijgt lampgebruik (uren × vermogen) en zit nu op 4% per seizoen;
   het stookmodel zegt bij een kas zonder historie eerlijk dat je er niet op moet varen, en buiten de trainingsdata

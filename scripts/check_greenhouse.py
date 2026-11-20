@@ -26,7 +26,7 @@ from sklearn.base import clone
 from predictor.core.manifest import MANIFEST_FILENAME, load_manifest
 from predictor.trainer import models
 from predictor.trainer.profile import prepare
-from predictor.trainer.run import _load_table, _scenario_constraints
+from predictor.trainer.run import _load_table, _scenario_constraints, category_counts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,7 +62,7 @@ def evaluate(use_case: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict
         raise SystemExit(f"{use_case}: needs training.test_blocks with a 'group' column")
     data = prepare(_load_table(manifest, None).df, cfg, manifest.policy)
     monotone = _scenario_constraints(manifest, data, cfg.target)
-    candidates = models.candidates("regression", cfg.anomaly_share, monotone)
+    candidates = models.candidates("regression", cfg.anomaly_share, monotone, categories=category_counts(data.features))
     frame = pd.DataFrame({"group": data.groups, "time": data.times, "y": data.y})
     blocks = ((data.times - data.times.min()).dt.days // cfg.test_blocks.days).to_numpy() % cfg.test_blocks.every
 

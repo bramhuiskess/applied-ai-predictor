@@ -363,15 +363,18 @@ model never saw, net result per m² over 5 months compared with keeping the curr
 
 | | advice given | promised | **true gain** | share of the best possible | advice that made it worse |
 |---|---|---|---|---|---|
-| the finder (default) | 78% of cases | +€2.61 | **+€2.03** | 70% | 10% |
-| advising every gain, however small | 100% | +€2.73 | +€2.05 | 71% | 16% |
-| only plans with at least medium certainty | 78% | +€1.02 | +€0.59 | 20% | 19% |
+| the finder (default) | 78% of cases | +€2.65 | **+€2.09** | 73% | 6% |
+| advising every gain, however small | 100% | +€2.79 | +€2.10 | 73% | 14% |
+| only plans with at least medium certainty | 78% | +€1.05 | +€0.60 | 21% | 18% |
 | the best plan in hindsight | | | +€2.88 | 100% | |
+
+*Re-measured after the heating model's blend got its own mix (`docs/technical.md`, model choice): before, the
+finder gave +€2.03 (70%) and 10% of its advice made things worse.*
 
 What this shows:
 
-- **Following the advice pays**: about 70% of what hindsight would have given.
-- **It promises about a quarter too much** (+€2.61 promised, +€2.03 real). That is the price of choosing the
+- **Following the advice pays**: about 73% of what hindsight would have given.
+- **It promises about a quarter too much** (+€2.65 promised, +€2.09 real). That is the price of choosing the
   best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper estimate.
 - **Small gains are not worth acting on.** Of the advice that promised less than €1/m², about 4 in 10 made
   things worse; above €2/m² almost none did. Hence `min_gain`: below it the advice is "keep the current settings".
@@ -381,6 +384,27 @@ What this shows:
 
 This is measured in the simulator, where the true result of every plan is known. For a real greenhouse nobody
 can know what the other 208 plans would have given.
+
+### Many levers: looking between the grid values
+
+2,000 plans over the nursery's five levers leave four values per lever: temperature is tried at 17, 19, 21 and 23
+°C only. So after the grid the finder **refines** the coarse levers: from the 3 best plans it tries each such lever
+on its own steps between the neighbouring grid values, keeps a change that is better, and repeats until nothing
+improves (`core/plan.py`). Levers the grid already tried on every step are left alone, so tomato-season (two levers,
+209 plans) is unchanged. `searched` reports `refined` (how many extra plans) and `refined_levers`.
+
+`python scripts/check_scenarios.py --finder --sample 1000` runs the finder on every unseen nursery batch (143) and
+re-simulates the advised plan, with and without the refinement (net result per batch, at the manifest's prices):
+
+| | plans tried | promised gain | **true gain** | made it worse |
+|---|---|---|---|---|
+| grid only | 1,024 | €64,740 | €33,745 | 18.2% |
+| grid + refinement (default) | 1,196 | €66,850 | **€35,459** (+5.1%) | 17.5% |
+
+The refinement pays without making the advice less reliable. Note what the same table shows about the nursery
+models: the finder promises about twice what the simulator gives back (the tomato-season finder: a quarter too
+much), and about one in six pieces of advice makes things worse. Read the nursery advice as a direction, not a
+promise.
 
 ### Not in this ticket
 

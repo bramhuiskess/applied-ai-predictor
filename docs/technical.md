@@ -49,7 +49,7 @@ python scripts/make_tomato_season.py                              # harvest mont
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 431 tests, ~2.5 min, fully offline
+pytest                            # 443 tests, ~2.5 min, fully offline
 ```
 
 ### Technical notebook
@@ -287,7 +287,9 @@ schema are shared by all outputs. `/use-cases` lists `outputs` (the names, `null
 
 Classification responses add `probabilities`; anomaly responses return `"anomaly"`/`"normal"`
 plus an `anomaly_score` (lower = more unusual). Inputs outside the range seen in training
-produce a warning, not an error.
+produce a warning, not an error. For a yes/no output the answer is "yes" from the model's
+`decision_threshold` on (see `GET /models/{id}`): 0.5 unless training found a clearly better cutoff
+(see [Model choice](#model-choice-details)).
 
 Invalid input gets a `422` that names the field: a missing feature, an unknown field,
 the wrong type, a binary value other than 0/1 (booleans are deliberately not accepted),
@@ -326,8 +328,12 @@ an unknown category, or NaN/Infinity.
     "anomaly_share": 0.05,
     "test_fraction": 0.2,
     "units": { "absence_pct": "%" },
+    "decision_threshold": "auto",               // yes/no target: "yes" from this probability on; "auto" chooses it
+                                                // on the validation split (best F1), a number fixes it
+    "error_costs": null,                        // or choose it by money: {"missed": 5000, "false_alarm": 200}
     "outputs": {}                               // instead of "target": a dict name -> {task, unit, target_min, target_max,
-                                                // baseline, algorithms}, see "Several outputs"
+                                                // baseline, algorithms, decision_threshold, error_costs},
+                                                // see "Several outputs"
   },
   "model": { "runner": "onnx", "version": "latest",
              "algorithms": null },              // default models for every output, e.g. ["lightgbm"]; omitted = baseline vs. LightGBM
@@ -426,6 +432,24 @@ manifest is rejected when the default leaves an output with an explicit task wit
 contradicts the `effects` declared in the scenario (for example a model that learns "more CO₂ = more gas"
 where "decreasing" is declared) stops training with "no candidate respects the declared effects" instead of
 silently using another model.
+
+<a id="model-choice-details"></a>**What the candidates do on their own.** Three choices are made on the validation
+split, so the manifest does not have to:
+
+- **Categories in linear models.** The profiler stores a category as its place in the sorted list of values
+  (AI4I's product quality: H = 0, L = 1, M = 2). Trees split on that fine, but a linear model would read it as a
+  scale. The linear and logistic models (and the linear half of the blend) therefore get one 0/1 column per
+  category (`trainer.models.CategoryIndicators`, exported to ONNX with its own small converter); importance and
+  declared effects are reported per input, as before. On the repository data: absence-forecast MAE 0.967 → 0.868,
+  arable-yield 4.09 → 3.85 t/ha.
+- **The blend's mix.** The blend averages the linear model and LightGBM; its share of the linear model is chosen
+  from 0.2, 0.35, 0.5, 0.65 and 0.8 (it stays 0.5 unless another mix is at least 1% better). The report shows the
+  mix. tomato-season heating: MAE 52.7 → 49.6 MJ/m² (linear share 0.2).
+- **The yes/no cutoff.** For a two-class output the cutoff is chosen on a grid of 0.05 to 0.95 for the best F1, or
+  for the lowest cost with `error_costs`, and stays 0.5 unless another cutoff is clearly better (0.02 F1, or 5% lower
+  cost). It is stored as `decision_threshold`, applied by the ONNX runner and checked by the parity check. With
+  sharp probabilities (LightGBM on AI4I) it stays 0.5; with `"error_costs": {"missed": 25, "false_alarm": 1}` it drops
+  to 0.075 and catches more failures (test cost 452 → 421). Group cross-validation does not tune it.
 
 **Aliases.** `aliases` maps an old use-case id to one output: `{"nursery-gas": "gas_m3"}`. The alias keeps the
 URLs, the flat single-output response shapes and the scenario results of the old use case unchanged

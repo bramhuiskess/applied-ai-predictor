@@ -183,6 +183,68 @@ def compare_certainty(nursery, batches: list[dict], df: pd.DataFrame, service, t
     return out.sort_values(["output", "level"], key=lambda s: s.map(order) if s.name == "level" else s)
 
 
+def compare_finder(nursery, batches: list[dict], df: pd.DataFrame, service, test_from: str,
+                   sample: int = 60, seed: int = 0) -> pd.DataFrame:
+    """Does following the best-plan advice pay in the simulator? The net result of the advised plan, re-simulated.
+
+    The nursery has five levers, so this is where the finder's refinement between grid values matters. The same
+    unseen batches are run with the refinement and with the plain grid. Euros per batch, as the manifest prices them.
+    """
+    from predictor.core import plan as planning
+
+    by_id = {b["batch_id"]: b for b in batches}
+    test = df[df["start_date"] >= test_from]
+    test = test.sample(min(sample, len(test)), random_state=seed)
+    info = service.describe("nursery")
+    order = info["feature_schema"]["x-feature-order"]
+    prices = {o["name"]: o for o in info["scenario"]["outputs"]}
+
+    def net(outcome: dict, row: pd.Series) -> float:
+        total = 0.0
+        for name, o in prices.items():
+            if o.get("value_eur") is not None:
+                total += outcome[name] * o["value_eur"]
+            elif o.get("price_from"):
+                total += outcome[name] * float(row[o["price_from"]]) * (-1 if o.get("is_cost") else 1)
+        return total
+
+    def run(label: str) -> dict:
+        advised, promised, true, worse, plans = 0, [], [], 0, []
+        for _, row in test.iterrows():
+            b = by_id[row["batch_id"]]
+            now = nursery.simulate(b)
+            if not now:
+                continue
+            features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+            body = service.best_plan("nursery", {"features": features})
+            plans.append(body["searched"]["plans"])
+            if not body["best"]:
+                true.append(0.0)
+                continue
+            after = nursery.counterfactual(b, **body["best"]["plan"])
+            if not after:
+                continue
+            gain = net(after, row) - net(now, row)
+            advised += 1
+            promised.append(body["best"]["net_eur"])
+            true.append(gain)
+            worse += gain < 0
+        return {"finder": label, "batches": len(true), "advice given %": 100 * advised / max(len(true), 1),
+                "promised gain": float(np.mean(promised)) if promised else float("nan"),
+                "true gain (all batches)": float(np.mean(true)) if true else float("nan"),
+                "made it worse % (of advice)": 100 * worse / max(advised, 1),
+                "plans tried": float(np.mean(plans)) if plans else float("nan")}
+
+    refined = run("grid + refinement (default)")
+    original = planning.coarse_levers
+    planning.coarse_levers = lambda *a, **k: {}   # the plain grid, for comparison
+    try:
+        grid_only = run("grid only")
+    finally:
+        planning.coarse_levers = original
+    return pd.DataFrame([refined, grid_only])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--weather", choices=["knmi", "synthetic"], default="knmi")
@@ -193,6 +255,7 @@ def main() -> None:
     parser.add_argument("--sample", type=int, default=60, help="test batches used for --sweeps")
     parser.add_argument("--verdicts", action="store_true", help="check the margin rule (clear effect or not)")
     parser.add_argument("--certainty", action="store_true", help="check that more comparable batches = smaller error")
+    parser.add_argument("--finder", action="store_true", help="does following the best-plan advice pay? (EUR per batch)")
     args = parser.parse_args()
 
     daily = (knmi.load_daily(nursery_mod.STATION, "2015-06-01", nursery_mod.END) if args.weather == "knmi"
@@ -215,6 +278,10 @@ def main() -> None:
         verdicts = compare_verdicts(nursery, batches, df, bootstrap.build_service(), test_from)
         print("\nverdicts of the scenario engine vs. the answer key\n")
         print(verdicts.round(1).to_string(index=False))
+    if args.finder:
+        finder = compare_finder(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
+        print("\nnet result per batch of following the best-plan advice, re-simulated (EUR)\n")
+        print(finder.round(1).to_string(index=False))
     if args.sweeps:
         sweeps = compare_sweeps(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
         print("\nwhole-range sweeps through the scenario engine vs. the true curves\n")
