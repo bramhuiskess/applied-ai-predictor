@@ -71,49 +71,42 @@ def make_split(n: int, test_fraction: float, chronological: bool, stratify: pd.S
     return Split(np.sort(train), np.sort(val), np.sort(test))
 
 
-def indicator_layout(categories: list[int] | None, n_features: int) -> tuple[list[int], list[int], list[int]]:
-    """Where every input ends up after `CategoryIndicators`.
+def indicator_layout(categories: list[int]) -> tuple[list[int], list[int], list[int]]:
+    """(numeric features, the feature of each 0/1 column, the code of each 0/1 column) for `CategoryIndicators`.
 
-    Returns (numeric inputs, the input behind each indicator column, the category code of each indicator column).
-    `categories[i]` is the number of categories of input i (0 for numbers, integers and yes/no).
+    `categories` holds the number of categories per feature, 0 for numbers.
     """
-    counts = list(categories) if categories is not None else [0] * n_features
-    numeric = [i for i, k in enumerate(counts) if k < 2]
-    columns = [i for i, k in enumerate(counts) if k >= 2 for _ in range(1, k)]
-    codes = [code for k in counts if k >= 2 for code in range(1, k)]
+    numeric = [i for i, k in enumerate(categories) if k < 2]
+    columns = [i for i, k in enumerate(categories) if k >= 2 for _ in range(1, k)]
+    codes = [code for k in categories if k >= 2 for code in range(1, k)]
     return numeric, columns, codes
 
 
 class CategoryIndicators(BaseEstimator, TransformerMixin):
-    """Turn category codes into 0/1 columns, for the linear models.
+    """One 0/1 column per category, for the linear models.
 
-    The profiler encodes a category as its position in the sorted list of values, so AI4I's product quality
-    becomes H=0, L=1, M=2. A tree can split on that, but a linear model would read it as a scale ("medium" above
-    "high"). This step gives the linear model one 0/1 column per category instead, leaving out the first category
-    (it is the reference, absorbed by the intercept). An unknown or imputed code that matches no category gives all
-    zeros, the same as the reference. Numbers pass through unchanged and come first.
+    The profiler encodes a category as its place in the sorted values (AI4I's product quality: H=0, L=1, M=2).
+    A tree can split on that, but a linear model reads it as a scale. The first category is the reference (the
+    intercept carries it), so it gets no column; a code that matches no category (imputed) counts as the reference.
+    The numbers come first, unchanged.
     """
 
     def __init__(self, categories: list[int] | None = None) -> None:
         self.categories = categories
 
-    def fit(self, X, y=None):  # noqa: ARG002 - sklearn signature
-        X = np.asarray(X)
-        self.n_features_in_ = X.shape[1]
-        self.numeric_, self.indicator_columns_, self.indicator_codes_ = indicator_layout(self.categories, X.shape[1])
+    def fit(self, X, y=None):  # noqa: ARG002 - same signature as other transformers
+        self.n_features_in_ = np.shape(X)[1]
+        self.numeric_, self.columns_, self.codes_ = indicator_layout(self.categories or [0] * self.n_features_in_)
         return self
 
     def transform(self, X):
         X = np.asarray(X)
-        parts = [X[:, self.numeric_]]
-        if self.indicator_columns_:
-            codes = np.asarray(self.indicator_codes_, dtype=X.dtype)
-            parts.append((X[:, self.indicator_columns_] == codes).astype(X.dtype))
-        return np.hstack(parts)
+        indicators = (X[:, self.columns_] == np.asarray(self.codes_, dtype=X.dtype)).astype(X.dtype)
+        return np.hstack([X[:, self.numeric_], indicators])
 
     def sources(self) -> list[int]:
-        """The input behind every output column."""
-        return [*self.numeric_, *self.indicator_columns_]
+        """The feature behind every column this step outputs."""
+        return [*self.numeric_, *self.columns_]
 
 
 class SignConstrainedLinearRegression(LinearRegression):
@@ -152,21 +145,20 @@ class SignConstrainedLinearRegression(LinearRegression):
         return self
 
 
-def _coefficients_by_input(pipeline: Pipeline, n_inputs: int) -> tuple[np.ndarray, np.ndarray]:
-    """A linear pipeline's coefficients per original input: (signed coefficient, total size of its coefficients).
+def _coefficients(pipeline: Pipeline, n_features: int) -> tuple[np.ndarray, np.ndarray]:
+    """A linear pipeline's coefficients per feature: (the coefficient, the summed size of its coefficients).
 
-    With `CategoryIndicators` a category has several coefficients (one per indicator column); its signed value is 0
-    (a category has no direction) and its size is the sum of their sizes. Inputs are standardised, so sizes compare.
+    A category has a coefficient per 0/1 column and no direction, so its coefficient is 0 and its size the sum.
     """
     coef = np.atleast_2d(pipeline.named_steps["model"].coef_)
     step = pipeline.named_steps.get("indicators")
-    sources = step.sources() if step is not None else list(range(coef.shape[1]))
-    numeric = len(step.numeric_) if step is not None else coef.shape[1]
-    signed, size = np.zeros(n_inputs), np.zeros(n_inputs)
-    for column, source in enumerate(sources):
-        size[source] += float(np.abs(coef[:, column]).sum())
+    sources = step.sources() if step else list(range(n_features))
+    numeric = len(step.numeric_) if step else n_features
+    signed, size = np.zeros(n_features), np.zeros(n_features)
+    for column, feature in enumerate(sources):
+        size[feature] += np.abs(coef[:, column]).sum()
         if column < numeric:
-            signed[source] = coef[0, column]
+            signed[feature] = coef[0, column]
     return signed, size
 
 
@@ -176,8 +168,8 @@ def pinned_effects(model: Pipeline, names: list[str], monotone: list[int] | None
     linear = est.named_estimators_["linear"] if isinstance(est, VotingRegressor) else model
     if not monotone or not isinstance(linear.named_steps.get("model"), SignConstrainedLinearRegression):
         return []
-    signed, _ = _coefficients_by_input(linear, len(names))
-    return [name for name, d, c in zip(names, monotone, signed) if d and abs(c) < 1e-9]
+    coef, _ = _coefficients(linear, len(names))
+    return [name for name, d, c in zip(names, monotone, coef) if d and abs(c) < 1e-9]
 
 
 def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | None = None,
@@ -185,8 +177,8 @@ def candidates(task: str, anomaly_share: float = 0.05, monotone: list[int] | Non
     """The models that may compete for a task; `allowed` (from the manifest) keeps only those names.
 
     `monotone` (one of -1/0/+1 per feature) becomes a LightGBM monotone constraint and,
-    for regression, a sign constraint on the linear model's coefficients. `categories` (the number of
-    categories per feature, 0 for numbers) gives the linear models 0/1 columns per category."""
+    for regression, a sign constraint on the linear model's coefficients. `categories` (the number
+    of categories per feature, 0 for numbers) gives the linear models a 0/1 column per category."""
     everything = _all_candidates(task, anomaly_share, monotone, categories)
     if allowed is None:
         return everything
@@ -203,17 +195,16 @@ def _all_candidates(task: str, anomaly_share: float, monotone: list[int] | None,
     lgbm = dict(n_estimators=400, learning_rate=0.05, num_leaves=31, random_state=SEED, verbose=-1)
     if monotone and any(monotone):
         lgbm["monotone_constraints"] = monotone
+    # Linear models get a 0/1 column per category; the trees keep the codes, they split on them fine.
     has_categories = bool(categories) and any(k >= 2 for k in categories)
 
-    def indicators() -> list[tuple[str, CategoryIndicators]]:
-        """Linear models get a 0/1 column per category; trees keep the codes (they split on them fine)."""
-        return [("indicators", CategoryIndicators(list(categories)))] if has_categories else []
+    def indicators():
+        return [("indicators", CategoryIndicators(categories))] if has_categories else []
 
     if task == "regression":
         signs = monotone
-        if has_categories and monotone:
-            # The linear model sees the numbers first, then the indicator columns, which have no declared effect.
-            numeric, columns, _ = indicator_layout(categories, len(categories))
+        if has_categories and monotone:   # the numbers come first, then the 0/1 columns (no declared effect)
+            numeric, columns, _ = indicator_layout(categories)
             signs = [monotone[i] for i in numeric] + [0] * len(columns)
 
         def linear():
@@ -244,57 +235,37 @@ def _all_candidates(task: str, anomaly_share: float, monotone: list[int] | None,
     raise ValueError(task)
 
 
-THRESHOLD_GRID = np.round(np.arange(0.05, 0.951, 0.025), 3)
-MIN_POSITIVES_FOR_THRESHOLD = 5
-# Leave 0.5 only for a clear gain on the validation rows. With sharp probabilities (LightGBM on AI4I) the F1
-# curve is flat between 0.4 and 0.6, and the best point there is noise: tuned it lost a test case.
-MIN_F1_GAIN = 0.02
-MIN_COST_SAVING = 0.05
+THRESHOLDS = [round(0.05 + 0.025 * i, 3) for i in range(37)]   # 0.05 .. 0.95
+MIN_F1_GAIN = 0.02        # leave 0.5 only for a clearly better F1 ...
+MIN_COST_SAVING = 0.05    # ... or a clearly lower cost
 
 
 def predict_labels(model: Pipeline, X: np.ndarray, threshold: float | None = None) -> np.ndarray:
-    """Class indices; for a yes/no output with a threshold, "yes" (index 1) from that probability on."""
+    """Class indices; with a yes/no `threshold`, "yes" (index 1) from that probability on."""
     if threshold is None:
         return model.predict(X)
-    proba = model.predict_proba(X)
-    if proba.shape[1] != 2:
-        return model.predict(X)
-    return (proba[:, 1] >= threshold).astype(int)
+    return (model.predict_proba(X)[:, 1] >= threshold).astype(int)
 
 
-def choose_threshold(y: pd.Series, probability_yes: np.ndarray, costs: dict[str, float] | None = None) -> tuple[float, str]:
-    """The cutoff for a yes/no output, chosen on rows the model did not learn from.
+def choose_threshold(y: pd.Series, probability: np.ndarray, costs: dict[str, float] | None = None) -> float:
+    """The yes/no cutoff with the best F1 on rows the model did not learn from, or the lowest cost with `costs`.
 
-    A probability of 50% is the right cutoff only when both mistakes are equally bad and both answers equally
-    common. With rare events (3% machine failures) it misses many of them. So the cutoff is the one with the best
-    F1 on the validation rows, or, with `costs` ({"missed": .., "false_alarm": ..}), the one with the lowest total
-    cost. A coarse grid (steps of 0.025) keeps it from fitting the noise of a few rows; on a tie the cutoff closest
-    to 0.5 wins, and 0.5 stays unless another cutoff is clearly better (`MIN_F1_GAIN`, `MIN_COST_SAVING`). With
-    fewer than 5 "yes" rows there is too little to go on and 0.5 stays.
+    A cutoff of 0.5 misses many rare events (3% machine failures) when the model is unsure about them. But with
+    sharp probabilities (LightGBM on AI4I) the F1 curve is flat between 0.4 and 0.6 and its best point is noise, so
+    0.5 stays unless another cutoff is clearly better. Ties go to the cutoff closest to 0.5.
     """
-    truth = np.asarray(y, dtype=int)
-    if truth.sum() < MIN_POSITIVES_FOR_THRESHOLD or truth.sum() == len(truth):
-        return 0.5, f"0.5: fewer than {MIN_POSITIVES_FOR_THRESHOLD} 'yes' rows in the validation split to choose from"
-
-    def score(t: float) -> float:
-        said_yes = probability_yes >= t
-        if costs:
-            return -float(costs["missed"] * np.sum(~said_yes & (truth == 1)) + costs["false_alarm"] * np.sum(said_yes & (truth == 0)))
-        return float(f1_score(truth, said_yes.astype(int), zero_division=0))
-
-    best, best_score = 0.5, None
-    for t in sorted(THRESHOLD_GRID, key=lambda v: abs(v - 0.5)):   # ties: the cutoff closest to 0.5
-        if best_score is None or score(t) > best_score + 1e-12:
-            best, best_score = float(t), score(t)
-    at_half = score(0.5)
-    how = "the lowest cost of mistakes" if costs else "the best F1"
-    if costs:   # scores are minus the cost
-        clear = -best_score <= (1 - MIN_COST_SAVING) * -at_half
-    else:
-        clear = best_score - at_half >= MIN_F1_GAIN
-    if best != 0.5 and not clear:
-        return 0.5, f"0.5: no other cutoff was clearly better on the validation split for {how}"
-    return best, f"{best:g}: chosen on the validation split for {how}"
+    truth = np.asarray(y, dtype=int) == 1
+    if truth.sum() < 5 or truth.all():
+        return 0.5   # too few "yes" rows to choose from
+    by_closeness = sorted(THRESHOLDS, key=lambda t: abs(t - 0.5))
+    if costs:
+        cost = {t: costs["missed"] * np.sum(truth & (probability < t))
+                + costs["false_alarm"] * np.sum(~truth & (probability >= t)) for t in THRESHOLDS}
+        best = min(by_closeness, key=cost.get)
+        return best if cost[best] <= (1 - MIN_COST_SAVING) * cost[0.5] else 0.5
+    f1 = {t: f1_score(truth, probability >= t, zero_division=0) for t in THRESHOLDS}
+    best = max(by_closeness, key=f1.get)
+    return best if f1[best] - f1[0.5] >= MIN_F1_GAIN else 0.5
 
 
 def evaluate(task: str, model: Pipeline, X: pd.DataFrame, y: pd.Series | None,
@@ -320,8 +291,7 @@ def evaluate(task: str, model: Pipeline, X: pd.DataFrame, y: pd.Series | None,
             "accuracy": float(accuracy_score(y, pred)),
             "f1": float(f1_score(y, pred, average="binary" if binary else "macro", zero_division=0)),
         }
-        if binary:
-            # Of the real "yes" cases, the share the model catches; of its "yes" answers, the share that is right.
+        if binary:   # the share of real "yes" cases it catches, and the share of its "yes" answers that is right
             metrics["recall"] = float(recall_score(y, pred, zero_division=0))
             metrics["precision"] = float(precision_score(y, pred, zero_division=0))
         if binary and y.nunique() == 2:
@@ -346,7 +316,7 @@ def effect_violations(model: Pipeline, names: list[str], monotone: list[int] | N
     est = model.named_steps["model"]
     if not monotone or not isinstance(est, (LinearRegression, LogisticRegression)):
         return []
-    coef, _ = _coefficients_by_input(model, len(names))  # scaled inputs: the sign is the same as for the raw input
+    coef, _ = _coefficients(model, len(names))  # scaled inputs: the sign is the same as for the raw input
     return [f"{name} should be {'increasing' if d > 0 else 'decreasing'} but the model says "
             f"{'increasing' if c > 0 else 'decreasing'}"
             for name, d, c in zip(names, monotone, coef) if d and c and np.sign(c) != d]
@@ -391,7 +361,7 @@ def feature_importance(model: Pipeline, names: list[str]) -> dict[str, float] | 
     if isinstance(est, (LGBMRegressor, LGBMClassifier)):
         gain = est.booster_.feature_importance(importance_type="gain")
     elif isinstance(est, (LinearRegression, LogisticRegression)):
-        _, gain = _coefficients_by_input(model, len(names))
+        _, gain = _coefficients(model, len(names))
     else:
         return None
     total = float(np.sum(gain)) or 1.0
@@ -410,6 +380,6 @@ def describe_algorithm(name: str) -> str:
         "linear_regression": "Linear regression (baseline)",
         "logistic_regression": "Logistic regression (baseline)",
         "lightgbm": "LightGBM gradient-boosted trees",
-        "blend": "Blend: average of the linear model and LightGBM",
+        "blend": "Blend: a mix of the linear model and LightGBM",
         "isolation_forest": "Isolation Forest (unsupervised anomaly detection)",
     }.get(name, name)

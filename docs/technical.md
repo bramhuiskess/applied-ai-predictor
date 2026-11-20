@@ -98,6 +98,21 @@ With `joins` in the manifest, step 0 connects the lookup tables to the base tabl
 
 Retraining creates version 2, 3, and so on. A manifest can pin `"model": {"version": "2"}`.
 
+### What step 4 chooses on its own
+
+- **Categories in linear models.** A category is stored as its place in the sorted values (AI4I's product quality:
+  H = 0, L = 1, M = 2). Trees split on that fine, but a linear model would read it as a scale, so the linear and
+  logistic models (and the linear half of the blend) get one 0/1 column per category (`CategoryIndicators`, with its
+  own ONNX converter). Importance and declared effects stay per input. absence-forecast MAE 0.967 → 0.868,
+  arable-yield 4.09 → 3.85 t/ha.
+- **The blend's mix.** The linear model's share in the blend is chosen from 0.2 to 0.8 on the validation split; it
+  stays 0.5 unless another mix is at least 1% better. tomato-season heating: MAE 52.7 → 49.6 MJ/m² (20% linear).
+- **The yes/no cutoff.** A two-class output says "yes" from `decision_threshold` on. It is chosen on the validation
+  split for the best F1 (or the lowest cost with `error_costs`) and stays 0.5 unless another cutoff is clearly better
+  (0.02 F1, or 5% lower cost). With LightGBM's sharp probabilities on AI4I it stays 0.5; with
+  `"error_costs": {"missed": 25, "false_alarm": 1}` it drops to 0.075 and the test cost goes from 452 to 421. A number
+  in the manifest fixes it; group cross-validation leaves it at 0.5.
+
 ## Joining datasets
 
 A use case can have one base table (`data_source`, one row per thing you predict) and any number of lookup
@@ -287,9 +302,8 @@ schema are shared by all outputs. `/use-cases` lists `outputs` (the names, `null
 
 Classification responses add `probabilities`; anomaly responses return `"anomaly"`/`"normal"`
 plus an `anomaly_score` (lower = more unusual). Inputs outside the range seen in training
-produce a warning, not an error. For a yes/no output the answer is "yes" from the model's
-`decision_threshold` on (see `GET /models/{id}`): 0.5 unless training found a clearly better cutoff
-(see [Model choice](#model-choice-details)).
+produce a warning, not an error. A yes/no output says "yes" from the model's `decision_threshold` on
+(in `GET /models/{id}`), see [What step 4 chooses on its own](#what-step-4-chooses-on-its-own).
 
 Invalid input gets a `422` that names the field: a missing feature, an unknown field,
 the wrong type, a binary value other than 0/1 (booleans are deliberately not accepted),
@@ -432,24 +446,6 @@ manifest is rejected when the default leaves an output with an explicit task wit
 contradicts the `effects` declared in the scenario (for example a model that learns "more CO₂ = more gas"
 where "decreasing" is declared) stops training with "no candidate respects the declared effects" instead of
 silently using another model.
-
-<a id="model-choice-details"></a>**What the candidates do on their own.** Three choices are made on the validation
-split, so the manifest does not have to:
-
-- **Categories in linear models.** The profiler stores a category as its place in the sorted list of values
-  (AI4I's product quality: H = 0, L = 1, M = 2). Trees split on that fine, but a linear model would read it as a
-  scale. The linear and logistic models (and the linear half of the blend) therefore get one 0/1 column per
-  category (`trainer.models.CategoryIndicators`, exported to ONNX with its own small converter); importance and
-  declared effects are reported per input, as before. On the repository data: absence-forecast MAE 0.967 → 0.868,
-  arable-yield 4.09 → 3.85 t/ha.
-- **The blend's mix.** The blend averages the linear model and LightGBM; its share of the linear model is chosen
-  from 0.2, 0.35, 0.5, 0.65 and 0.8 (it stays 0.5 unless another mix is at least 1% better). The report shows the
-  mix. tomato-season heating: MAE 52.7 → 49.6 MJ/m² (linear share 0.2).
-- **The yes/no cutoff.** For a two-class output the cutoff is chosen on a grid of 0.05 to 0.95 for the best F1, or
-  for the lowest cost with `error_costs`, and stays 0.5 unless another cutoff is clearly better (0.02 F1, or 5% lower
-  cost). It is stored as `decision_threshold`, applied by the ONNX runner and checked by the parity check. With
-  sharp probabilities (LightGBM on AI4I) it stays 0.5; with `"error_costs": {"missed": 25, "false_alarm": 1}` it drops
-  to 0.075 and catches more failures (test cost 452 → 421). Group cross-validation does not tune it.
 
 **Aliases.** `aliases` maps an old use-case id to one output: `{"nursery-gas": "gas_m3"}`. The alias keeps the
 URLs, the flat single-output response shapes and the scenario results of the old use case unchanged

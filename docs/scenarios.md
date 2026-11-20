@@ -391,7 +391,7 @@ can know what the other 208 plans would have given.
 °C only. So after the grid the finder **refines** the coarse levers: from the 3 best plans it tries each such lever
 on its own steps between the neighbouring grid values, keeps a change that is better, and repeats until nothing
 improves (`core/plan.py`). Levers the grid already tried on every step are left alone, so tomato-season (two levers,
-209 plans) is unchanged. `searched` reports `refined` (how many extra plans) and `refined_levers`.
+209 plans) is unchanged. `searched.refined` says how many extra plans it tried.
 
 `python scripts/check_scenarios.py --finder --sample 1000` runs the finder on every unseen nursery batch (143) and
 re-simulates the advised plan, with and without the refinement (net result per batch, at the manifest's prices):

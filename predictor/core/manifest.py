@@ -63,22 +63,14 @@ class TestBlocks(_Strict):
 
 
 class ErrorCosts(_Strict):
-    """What each kind of mistake of a yes/no output costs, to choose the cutoff by money instead of by F1.
+    """What the two mistakes of a yes/no output cost, to choose its cutoff by money. Only the ratio matters."""
 
-    `missed`: the answer was "yes" but the model said "no" (a machine failure nobody saw coming).
-    `false_alarm`: the model said "yes" but it was "no" (an inspection that was not needed).
-    Only the ratio matters; euros, hours or any other unit work.
-    """
-
-    missed: float = Field(gt=0, allow_inf_nan=False)
-    false_alarm: float = Field(gt=0, allow_inf_nan=False)
+    missed: float = Field(gt=0, allow_inf_nan=False)        # it was "yes", the model said "no" (a failure nobody saw)
+    false_alarm: float = Field(gt=0, allow_inf_nan=False)   # the model said "yes", it was "no" (a needless check)
 
 
-DecisionThreshold = float | Literal["auto"]
-
-
-def _check_decision(threshold: DecisionThreshold, costs: ErrorCosts | None, task: str) -> None:
-    if threshold != "auto" and not 0.0 < float(threshold) < 1.0:
+def _check_decision(threshold: float | str, costs: ErrorCosts | None, task: str) -> None:
+    if threshold != "auto" and not 0.0 < threshold < 1.0:
         raise ValueError("'decision_threshold' is a probability between 0 and 1, or \"auto\"")
     if threshold != "auto" and costs is not None:
         raise ValueError("give either a fixed 'decision_threshold' or 'error_costs' to choose it, not both")
@@ -119,7 +111,7 @@ class OutputConfig(_Strict):
     algorithms: list[str] | None = Field(default=None, min_length=1)
     # Yes/no outputs: the probability from which the answer is "yes". "auto" chooses it on the validation split
     # (the best F1, or the lowest cost with `error_costs`); a number fixes it.
-    decision_threshold: DecisionThreshold = "auto"
+    decision_threshold: float | Literal["auto"] = "auto"
     error_costs: ErrorCosts | None = None
 
     @model_validator(mode="after")
@@ -156,7 +148,7 @@ class TrainingConfig(_Strict):
     test_fraction: float = Field(default=0.2, gt=0.0, lt=0.9)
     units: dict[str, str] = {}
     # Yes/no target: the probability from which the answer is "yes" (see OutputConfig).
-    decision_threshold: DecisionThreshold = "auto"
+    decision_threshold: float | Literal["auto"] = "auto"
     error_costs: ErrorCosts | None = None
 
     @model_validator(mode="after")

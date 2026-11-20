@@ -17,26 +17,25 @@ in two ways, both set on evidence (the tomato simulator knows the true result of
 A limit on certainty (comparable cases) is available as `min_certainty`, but it is off by default: in the same
 test it removed two thirds of the gain and did not make the advice more reliable.
 
-**A sharper look where the grid is coarse.** 2,000 plans spread over five levers leave four values per lever
-(the nursery's temperature is only tried at 17, 19, 21 and 23 degrees). So after the grid, the finder refines:
-from the best few plans it tries each coarse lever on its own steps between the neighbouring grid values,
-keeps a change when it is better, and repeats until nothing improves. Levers the grid already tried on every
-step are not refined, so with one or two levers the result is the plain grid.
+With many levers the grid is coarse: 2,000 plans over the nursery's five levers leave four values per lever
+(temperature 17, 19, 21 and 23 degrees). So the finder then refines the best plans: it tries each coarse lever
+on its own steps between the grid values, keeps a better plan and repeats until nothing improves. In the
+nursery simulator that gave 5% more true gain per batch (`scripts/check_scenarios.py --finder`).
 """
 
 from __future__ import annotations
 
 import itertools
 import math
-from typing import Any
+from typing import Any, Callable
 
 from predictor.core.manifest import ScenarioConfig
 
 MAX_PLANS = 2000
 MIN_GAIN_SHARE = 0.4      # of the typical error; with it 7% of the advice made things worse instead of 16%
 CERTAINTY_ORDER = {"low": 0, "medium": 1, "high": 2}
-REFINE_STARTS = 3         # refine from this many of the best plans of the grid
-REFINE_ROUNDS = 4         # at most this many passes over the coarse levers per start
+REFINE_STARTS = 3         # refine the best 3 plans of the grid
+REFINE_ROUNDS = 4         # at most 4 passes over the coarse levers each
 
 
 def lever_values(low: float, high: float, step: float, at_most: int) -> list[float]:
@@ -50,7 +49,7 @@ def lever_values(low: float, high: float, step: float, at_most: int) -> list[flo
 
 
 def axes(scenario: ScenarioConfig, levers: list[str], max_plans: int = MAX_PLANS) -> dict[str, list[float]]:
-    """The values the grid tries per lever: its own steps, thinned evenly when all combinations would be too many."""
+    """The values of every lever in the grid: its own steps, thinned evenly when there are too many plans."""
     per_lever = max(2, int(max_plans ** (1 / len(levers))))
     return {name: lever_values(scenario.levers[name].min, scenario.levers[name].max, scenario.levers[name].step, per_lever)
             for name in levers}
@@ -58,30 +57,56 @@ def axes(scenario: ScenarioConfig, levers: list[str], max_plans: int = MAX_PLANS
 
 def grid(scenario: ScenarioConfig, levers: list[str], max_plans: int = MAX_PLANS) -> list[dict[str, float]]:
     """Every combination of lever values, at most `max_plans` (coarser per lever when needed)."""
-    values = axes(scenario, levers, max_plans)
-    return [dict(zip(levers, combination)) for combination in itertools.product(*values.values())]
+    values = axes(scenario, levers, max_plans).values()
+    return [dict(zip(levers, combination)) for combination in itertools.product(*values)]
 
 
 def coarse_levers(scenario: ScenarioConfig, levers: list[str], max_plans: int = MAX_PLANS) -> dict[str, float]:
-    """The levers the grid could not try on every step: name -> the largest gap between two values it tried."""
-    found = {}
+    """The levers the grid could not try on every step, with the largest gap between two values it tried."""
+    coarse = {}
     for name, values in axes(scenario, levers, max_plans).items():
         lever = scenario.levers[name]
-        if len(values) < int(round((lever.max - lever.min) / lever.step)) + 1:
-            found[name] = max(b - a for a, b in zip(values, values[1:]))
-    return found
+        if len(values) < round((lever.max - lever.min) / lever.step) + 1:
+            coarse[name] = max(b - a for a, b in zip(values, values[1:]))
+    return coarse
 
 
 def neighbours(scenario: ScenarioConfig, plan: dict[str, float], lever: str, gap: float) -> list[dict[str, float]]:
-    """The plan with `lever` moved to each of its own steps within `gap` of its value (the value itself left out)."""
+    """The plan with `lever` on each of its own steps within `gap` of its value."""
     config, value = scenario.levers[lever], plan[lever]
     first = math.ceil((max(config.min, value - gap) - config.min) / config.step - 1e-9)
     last = math.floor((min(config.max, value + gap) - config.min) / config.step + 1e-9)
-    steps = (round(config.min + k * config.step, 10) for k in range(first, last + 1))
-    return [{**plan, lever: v} for v in steps if abs(v - value) > 1e-9]
+    values = [round(config.min + k * config.step, 10) for k in range(first, last + 1)]
+    return [{**plan, lever: v} for v in values if abs(v - value) > 1e-9]
 
 
-def plan_key(plan: dict[str, float]) -> tuple:
+def refine(scenario: ScenarioConfig, candidates: list[dict[str, Any]], coarse: dict[str, float],
+           calculate: Callable[[list[dict[str, float]]], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Look between the grid values around the best plans (see the module doc); returns the plans it added.
+
+    A candidate is a dict with at least `plan`, `score` and `ok` (may be advised); `calculate` turns plans into them.
+    """
+    known = {_key(c["plan"]): c for c in candidates}
+    added = []
+    for current in sorted((c for c in candidates if c["ok"]), key=lambda c: -c["score"])[:REFINE_STARTS]:
+        for _ in range(REFINE_ROUNDS):
+            moved = False
+            for lever, gap in coarse.items():
+                nearby = neighbours(scenario, current["plan"], lever, gap)
+                new = [p for p in nearby if _key(p) not in known]
+                for c in calculate(new) if new else []:
+                    known[_key(c["plan"])] = c
+                    added.append(c)
+                options = [known[_key(p)] for p in nearby]
+                best = max((c for c in options if c["ok"]), key=lambda c: c["score"], default=current)
+                if best["score"] > current["score"]:
+                    current, moved = best, True
+            if not moved:
+                break
+    return added
+
+
+def _key(plan: dict[str, float]) -> tuple:
     return tuple(sorted(plan.items()))
 
 

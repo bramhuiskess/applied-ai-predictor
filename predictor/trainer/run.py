@@ -27,6 +27,8 @@ from predictor.trainer.join import apply_joins
 from predictor.trainer.profile import SharedFeatures, build_feature_schema, detect_task, prepare, shared_features
 
 EVALUATION_SAMPLES = 500
+BLEND_WEIGHTS = (0.2, 0.35, 0.5, 0.65, 0.8)   # the linear model's share in the blend
+MIN_BLEND_GAIN = 0.01                          # another mix than half and half must have a 1% lower validation MAE
 
 
 @dataclass
@@ -76,7 +78,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         data.notes[:0] = joined.notes
     task = data.task
     feature_names = [f.name for f in data.features]
-    categories = category_counts(data.features)
+    categories = _category_counts(data.features)
     monotone = _scenario_constraints(manifest, data, cfg.target)
     bounds = ((cfg.target_min, cfg.target_max)
               if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None) else None)
@@ -131,23 +133,24 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
     results: dict[str, dict[str, Any]] = {}
     best_name, best_val = None, None
     excluded: dict[str, list[str]] = {}
-    setting = _threshold_setting(task, data, cfg)
+    # Yes/no outputs: "yes" from this probability on, set in the manifest or chosen on the validation split.
+    cutoff = None
+    if task == "classification" and len(data.classes) == 2:
+        cutoff = 0.5 if cfg.decision_threshold == "auto" else cfg.decision_threshold
+    tune_cutoff = cutoff is not None and cfg.decision_threshold == "auto" and fit_groups is None
     for name, pipeline in models.candidates(task, cfg.anomaly_share, monotone, allowed, categories).items():
         unseen = None   # (rows, true values, predictions) the candidate did not learn from: calibrates the range
-        threshold, threshold_note = setting
+        threshold = cutoff
         if fit_groups is not None:
-            if threshold == "auto":
-                threshold, threshold_note = 0.5, "0.5: not tuned when the model is chosen by cross-validation over groups"
             val_metrics, out_of_fold = _group_cross_validation(task, pipeline, X_fit, y_fit, fit_groups, bounds, True,
                                                                threshold)
             unseen = (X_fit, y_fit, out_of_fold)
         else:
             pipeline.fit(X_train.to_numpy(dtype="float32"), y_train)
             make_thresholds_float32_safe(pipeline)
-            if threshold == "auto":
-                costs = cfg.error_costs.model_dump() if cfg.error_costs else None
-                threshold, threshold_note = models.choose_threshold(
-                    y_val, pipeline.predict_proba(X_val.to_numpy(dtype="float32"))[:, 1], costs)
+            if tune_cutoff:
+                probability = pipeline.predict_proba(X_val.to_numpy(dtype="float32"))[:, 1]
+                threshold = models.choose_threshold(y_val, probability, cfg.error_costs and cfg.error_costs.model_dump())
             if name == "blend":
                 _choose_blend_weight(pipeline, X_val, y_val, bounds)
             val_metrics = models.evaluate(task, pipeline, X_val, y_val, label_val, bounds, threshold)
@@ -158,7 +161,7 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
         make_thresholds_float32_safe(final)
         test_metrics = models.evaluate(task, final, X_test, y_test, label_test, bounds, threshold)
         results[name] = {"model": final, "validation": val_metrics, "test": test_metrics, "unseen": unseen,
-                         "pipeline": candidate, "threshold": threshold, "threshold_note": threshold_note}
+                         "pipeline": candidate, "threshold": threshold}
         violations = models.effect_violations(final, feature_names, monotone)
         if violations:
             # A scenario model must respect what the manifest declares, so it cannot win.
@@ -224,11 +227,8 @@ def _train_output(manifest: Manifest, cfg: TrainingConfig, table: _Table, allowe
                           if task == "regression" and (cfg.target_min is not None or cfg.target_max is not None)
                           else None),
         "classes": data.classes,
-        # The blend's share of the linear model (the rest is LightGBM), chosen on the validation split.
-        "blend_weight": (_blend_weight(published) if best_name == "blend" else None),
-        # Yes/no outputs: "yes" from this probability on (null: the class with the highest probability).
-        "decision_threshold": chosen["threshold"],
-        "decision_threshold_note": chosen["threshold_note"],
+        "decision_threshold": chosen["threshold"],   # yes/no: "yes" from this probability on
+        "blend_weight": _linear_share(published) if best_name == "blend" else None,
         "features": feature_names,
         "metrics": chosen["test"],
         "candidates": {n: {"validation": r["validation"], "test": r["test"]} for n, r in results.items()},
@@ -326,45 +326,29 @@ def train_use_case(manifest_path: Path, registry: FilesystemRegistry, data_path:
     return {**described[first_name], "report": str(report_path), "outputs": described}
 
 
-BLEND_WEIGHTS = (0.2, 0.35, 0.5, 0.65, 0.8)   # the linear model's share in the blend
-MIN_BLEND_GAIN = 0.01                          # leave 50/50 only for at least 1% lower validation MAE
+def _choose_blend_weight(pipeline, X_val: pd.DataFrame, y_val: pd.Series, bounds: tuple | None) -> None:
+    """Mix the blend's two fitted parts in the proportion that does best on the validation rows.
 
-
-def _choose_blend_weight(pipeline, X_val: pd.DataFrame, y_val: pd.Series, bounds: tuple | None) -> float:
-    """Set the blend's mix of the linear model and LightGBM to what works best on the validation rows.
-
-    Both parts are already fitted, so this only re-weights their predictions. Any mix of two models that obey the
-    declared effects obeys them too. The share stays 0.5 unless another is clearly better (`MIN_BLEND_GAIN`).
+    A mix of two models that obey the declared effects obeys them too. It stays half and half unless another mix
+    is at least `MIN_BLEND_GAIN` better.
     """
-    blend = pipeline.named_steps["model"]
     X = pipeline[:-1].transform(X_val.to_numpy(dtype="float32"))
-    linear, trees = (part.predict(X) for part in blend.estimators_)
-    truth = np.asarray(y_val, dtype=float)
-    mae = {w: float(np.mean(np.abs(_bounded(w * linear + (1 - w) * trees, bounds) - truth))) for w in BLEND_WEIGHTS}
+    linear, trees = (part.predict(X) for part in pipeline.named_steps["model"].estimators_)
+    mae = {w: np.mean(np.abs(_bounded(w * linear + (1 - w) * trees, bounds) - y_val.to_numpy())) for w in BLEND_WEIGHTS}
     best = min(BLEND_WEIGHTS, key=lambda w: (mae[w], abs(w - 0.5)))
     if mae[best] > (1 - MIN_BLEND_GAIN) * mae[0.5]:
         best = 0.5
     pipeline.set_params(model__weights=np.array([best, 1 - best]))   # an array: the ONNX converter sums it
-    return best
 
 
-def _blend_weight(pipeline) -> float:
+def _linear_share(pipeline) -> float:
     weights = pipeline.named_steps["model"].weights
-    return float(weights[0]) if weights is not None else 0.5
+    return 0.5 if weights is None else float(weights[0])
 
 
-def _threshold_setting(task: str, data, cfg: TrainingConfig) -> tuple[float | str | None, str | None]:
-    """The yes/no cutoff to use: a number from the manifest, "auto" (choose on validation), or None (not yes/no)."""
-    if task != "classification" or len(data.classes or []) != 2:
-        return None, None
-    if cfg.decision_threshold != "auto":
-        return float(cfg.decision_threshold), f"{float(cfg.decision_threshold):g}: fixed in the manifest"
-    return "auto", None
-
-
-def category_counts(features) -> list[int]:
-    """The number of categories of every input (0 for numbers, integers and yes/no), for the linear models."""
-    return [len(f.categories or []) if f.kind == "categorical" else 0 for f in features]
+def _category_counts(features) -> list[int]:
+    """The number of categories of every feature, 0 for numbers (the linear models get a 0/1 column per category)."""
+    return [len(f.categories) if f.kind == "categorical" else 0 for f in features]
 
 
 def _encoding(schema: dict[str, Any]) -> dict[str, Any]:
@@ -506,9 +490,7 @@ def render_report(manifest: Manifest, d: dict[str, Any], outputs: dict[str, dict
 def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
     lines = [
         f"- Task: **{d['task_type']}**" + (f", target `{d['target_name']}`" if d.get("target_name") else ""),
-        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}**"
-        + (f" ({d['blend_weight']:.0%} linear, {1 - d['blend_weight']:.0%} LightGBM)"
-           if d.get("blend_weight") is not None else "") + " (selected on "
+        f"- Chosen model: **{models.describe_algorithm(d['algorithm'])}** (selected on "
         + (f"{d['split']['validation_method']} cross-validation" if d["split"].get("validation_method", "hold-out") != "hold-out"
            else "the validation split") + f", then retrained on {d['split'].get('published_on', 'train + validation')})",
         f"- Data: {d['dataset']['rows']} rows from `{d['dataset']['path']}`; split train/validation/test = "
@@ -520,8 +502,7 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
            else f" (backtest: test from {d['split']['test_from']})" if d["split"].get("test_from")
            else " (chronological)" if d["split"]["chronological"] else " (random, seed 42)"),
         f"- Trained at: {d['trained_at']}",
-        *([f"- Yes/no cutoff: the answer is \"{d['classes'][1]}\" from a probability of {d['decision_threshold_note']}"]
-          if d.get("decision_threshold") is not None and d.get("decision_threshold_note") else []),
+        *_choice_lines(manifest, d),
         *_new_group_lines(d),
         *_range_lines(d),
         "",
@@ -569,6 +550,23 @@ def _output_report(manifest: Manifest, d: dict[str, Any]) -> list[str]:
     return lines
 
 
+
+
+def _choice_lines(manifest: Manifest, d: dict[str, Any]) -> list[str]:
+    """Besides the model: the blend's mix and the yes/no cutoff."""
+    lines = []
+    if d.get("blend_weight") is not None:
+        lines.append(f"- Blend: {d['blend_weight']:.0%} linear model, {1 - d['blend_weight']:.0%} LightGBM")
+    if d.get("decision_threshold") is not None:
+        cfg = manifest.training.output_configs().get(d["output"])
+        if cfg and cfg.decision_threshold != "auto":
+            how = "set in the manifest"
+        elif d["split"].get("validation_method", "hold-out") != "hold-out":
+            how = "not tuned with cross-validation over groups"
+        else:
+            how = "chosen on the validation split" + (" by the cost of mistakes" if cfg and cfg.error_costs else "")
+        lines.append(f"- Yes/no cutoff: \"{d['classes'][1]}\" from a probability of {d['decision_threshold']:g} ({how})")
+    return lines
 
 
 def _range_lines(d: dict[str, Any]) -> list[str]:

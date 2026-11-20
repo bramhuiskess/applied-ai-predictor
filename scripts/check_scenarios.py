@@ -185,64 +185,51 @@ def compare_certainty(nursery, batches: list[dict], df: pd.DataFrame, service, t
 
 def compare_finder(nursery, batches: list[dict], df: pd.DataFrame, service, test_from: str,
                    sample: int = 60, seed: int = 0) -> pd.DataFrame:
-    """Does following the best-plan advice pay in the simulator? The net result of the advised plan, re-simulated.
+    """Does following the best-plan advice pay? The advised plan re-simulated, with and without the refinement.
 
-    The nursery has five levers, so this is where the finder's refinement between grid values matters. The same
-    unseen batches are run with the refinement and with the plain grid. Euros per batch, as the manifest prices them.
+    The nursery has five levers, so the finder's grid is coarse here (see `predictor/core/plan.py`).
+    Net result per batch in euros, priced as in the manifest.
     """
     from predictor.core import plan as planning
 
     by_id = {b["batch_id"]: b for b in batches}
     test = df[df["start_date"] >= test_from]
-    test = test.sample(min(sample, len(test)), random_state=seed)
     info = service.describe("nursery")
     order = info["feature_schema"]["x-feature-order"]
-    prices = {o["name"]: o for o in info["scenario"]["outputs"]}
+    prices = info["scenario"]["outputs"]
 
     def net(outcome: dict, row: pd.Series) -> float:
-        total = 0.0
-        for name, o in prices.items():
-            if o.get("value_eur") is not None:
-                total += outcome[name] * o["value_eur"]
-            elif o.get("price_from"):
-                total += outcome[name] * float(row[o["price_from"]]) * (-1 if o.get("is_cost") else 1)
-        return total
+        return sum(outcome[o["name"]] * (o["value_eur"] if o["value_eur"] is not None
+                                         else float(row[o["price_from"]]) * (-1 if o["is_cost"] else 1))
+                   for o in prices if o["value_eur"] is not None or o["price_from"])
 
-    def run(label: str) -> dict:
-        advised, promised, true, worse, plans = 0, [], [], 0, []
-        for _, row in test.iterrows():
-            b = by_id[row["batch_id"]]
-            now = nursery.simulate(b)
-            if not now:
-                continue
-            features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+    records = []
+    refine_starts = planning.REFINE_STARTS
+    for _, row in test.sample(min(sample, len(test)), random_state=seed).iterrows():
+        b = by_id[row["batch_id"]]
+        now = nursery.simulate(b)
+        if not now:
+            continue
+        features = {k: (row[k].item() if hasattr(row[k], "item") else row[k]) for k in order}
+        record = {}
+        for name, starts in [("refined", refine_starts), ("grid", 0)]:   # 0 starts: the plain grid
+            planning.REFINE_STARTS = starts
             body = service.best_plan("nursery", {"features": features})
-            plans.append(body["searched"]["plans"])
-            if not body["best"]:
-                true.append(0.0)
-                continue
-            after = nursery.counterfactual(b, **body["best"]["plan"])
-            if not after:
-                continue
-            gain = net(after, row) - net(now, row)
-            advised += 1
-            promised.append(body["best"]["net_eur"])
-            true.append(gain)
-            worse += gain < 0
-        return {"finder": label, "batches": len(true), "advice given %": 100 * advised / max(len(true), 1),
-                "promised gain": float(np.mean(promised)) if promised else float("nan"),
-                "true gain (all batches)": float(np.mean(true)) if true else float("nan"),
-                "made it worse % (of advice)": 100 * worse / max(advised, 1),
-                "plans tried": float(np.mean(plans)) if plans else float("nan")}
-
-    refined = run("grid + refinement (default)")
-    original = planning.coarse_levers
-    planning.coarse_levers = lambda *a, **k: {}   # the plain grid, for comparison
-    try:
-        grid_only = run("grid only")
-    finally:
-        planning.coarse_levers = original
-    return pd.DataFrame([refined, grid_only])
+            plan = body["best"]["plan"] if body["best"] else None
+            record[name] = net(nursery.counterfactual(b, **plan), row) - net(now, row) if plan else 0.0
+            record[f"{name}_promised"] = body["best"]["net_eur"] if plan else 0.0
+            record[f"{name}_given"] = plan is not None
+            record[f"{name}_plans"] = body["searched"]["plans"]
+        records.append(record)
+    planning.REFINE_STARTS = refine_starts
+    r = pd.DataFrame(records)
+    summary = {}
+    for name, label in [("grid", "grid only"), ("refined", "grid + refinement (default)")]:
+        given = r[f"{name}_given"]
+        summary[label] = {"plans tried": r[f"{name}_plans"].mean(), "advice given %": given.mean() * 100,
+                          "promised gain": r[f"{name}_promised"].mean(), "true gain": r[name].mean(),
+                          "made it worse % (of advice given)": (r.loc[given, name] < 0).mean() * 100}
+    return pd.DataFrame(summary).T
 
 
 def main() -> None:
@@ -281,7 +268,7 @@ def main() -> None:
     if args.finder:
         finder = compare_finder(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
         print("\nnet result per batch of following the best-plan advice, re-simulated (EUR)\n")
-        print(finder.round(1).to_string(index=False))
+        print(finder.round(1).to_string())
     if args.sweeps:
         sweeps = compare_sweeps(nursery, batches, df, bootstrap.build_service(), test_from, args.sample)
         print("\nwhole-range sweeps through the scenario engine vs. the true curves\n")

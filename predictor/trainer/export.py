@@ -46,21 +46,20 @@ update_registered_converter(
 )
 
 
-def _indicator_shape(operator) -> None:
+# CategoryIndicators in ONNX: the numbers as they are, then Equal(code) cast to 0/1 for every category column.
+def _indicators_shape(operator) -> None:
     rows = operator.inputs[0].get_first_dimension()
     operator.outputs[0].type = FloatTensorType([rows, len(operator.raw_operator.sources())])
 
 
 def _convert_indicators(scope, operator, container) -> None:
-    """The numbers as they are, then one 0/1 column per category code: Gather, Equal, Cast and Concat."""
-    step, opv = operator.raw_operator, container.target_opset
-    features = operator.inputs[0]
+    step, opv, features = operator.raw_operator, container.target_opset, operator.inputs[0]
     parts = []
     if step.numeric_:
         parts.append(OnnxGather(features, np.array(step.numeric_, dtype=np.int64), axis=1, op_version=opv))
-    if step.indicator_columns_:
-        codes = OnnxGather(features, np.array(step.indicator_columns_, dtype=np.int64), axis=1, op_version=opv)
-        same = OnnxEqual(codes, np.array([step.indicator_codes_], dtype=np.float32), op_version=opv)
+    if step.columns_:
+        codes = OnnxGather(features, np.array(step.columns_, dtype=np.int64), axis=1, op_version=opv)
+        same = OnnxEqual(codes, np.array([step.codes_], dtype=np.float32), op_version=opv)
         parts.append(OnnxCast(same, to=TensorProto.FLOAT, op_version=opv))
     outputs = operator.outputs[:1]
     node = (OnnxConcat(*parts, axis=1, op_version=opv, output_names=outputs) if len(parts) > 1
@@ -68,7 +67,7 @@ def _convert_indicators(scope, operator, container) -> None:
     node.add_to(scope, container)
 
 
-update_registered_converter(CategoryIndicators, "PredictorCategoryIndicators", _indicator_shape, _convert_indicators)
+update_registered_converter(CategoryIndicators, "CategoryIndicators", _indicators_shape, _convert_indicators)
 
 
 def make_thresholds_float32_safe(model: Pipeline) -> None:
@@ -135,8 +134,7 @@ def check_parity(model: Pipeline, artifact: bytes, X: pd.DataFrame, descriptor: 
         expected = model.predict_proba(X32)
         actual = np.array([[p[c] for c in classes] for p in out.probabilities])
         threshold = descriptor.get("decision_threshold")
-        labels = (expected[:, 1] >= threshold).astype(int) if threshold is not None and len(classes) == 2 \
-            else expected.argmax(axis=1)
+        labels = (expected[:, 1] >= threshold).astype(int) if threshold is not None else expected.argmax(axis=1)
         agreement = float(np.mean(np.array([classes.index(v) for v in out.values]) == labels))
     else:
         expected, actual = model.decision_function(X32), np.array(out.scores)
