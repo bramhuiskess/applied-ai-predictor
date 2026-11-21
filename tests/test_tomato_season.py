@@ -77,8 +77,9 @@ def table(daily):
 
 
 def test_lamps_follow_the_darkness():
-    hours = season.lamp_hours(np.array([300.0] * 10 + [2500.0] * 10), 16.0)
-    assert hours[0] == 16.0 and hours[-1] == 0.0
+    hours = season.lamp_hours(np.array([300.0] * 10 + [1700.0] * 10 + [2600.0] * 10), 16.0)
+    assert hours[0] == 16.0 and hours[-1] == 0.0          # full on in the dark months, off in high summer
+    assert 6.0 < hours[19] < 10.0                         # and tapering in between, as the real growers did
 
 
 def test_one_row_is_one_decision(table):

@@ -1,0 +1,183 @@
+{
+  "manifest_version": "1.0",
+  "use_case_id": "orchid-batch",
+  "description": "A batch of pot orchids (Phalaenopsis) through three phases: raising, warm growth, cooling. From the weeks and temperature per phase: how many plants can be sold and how many have two spikes (the better-paid class), weeks to sale, and the heating, cooling and space per plant. With the grower's prices a scenario gives the net result per plant, and the best-plan finder proposes the schedule. The plant side is built on published research, NOT fitted on measurements: a demonstration of a crop with phases. Energy uses a heat balance fitted on real greenhouses, on real KNMI weather.",
+  "data_source": {
+    "adapter": "csv-file",
+    "path": "data/orchid_batches.csv"
+  },
+  "training": {
+    "time_column": "start_date",
+    "test_from": "2023-01-01",
+    "drop_columns": [
+      "batch_id"
+    ],
+    "outputs": {
+      "spikes_per_plant": {
+        "unit": "spikes",
+        "target_min": 0,
+        "baseline": {
+          "column": "usual_spikes_per_plant",
+          "label": "the usual schedule in an average year"
+        }
+      },
+      "sellable_share": {
+        "unit": "share of plants",
+        "target_min": 0,
+        "target_max": 1
+      },
+      "two_spike_share": {
+        "unit": "share of plants",
+        "target_min": 0,
+        "target_max": 1
+      },
+      "weeks_to_sale": {
+        "unit": "weeks",
+        "target_min": 0,
+        "baseline": {
+          "column": "usual_weeks_to_sale",
+          "label": "the usual schedule in an average year"
+        }
+      },
+      "heat_mj_per_plant": {
+        "unit": "MJ",
+        "target_min": 0,
+        "baseline": {
+          "column": "usual_heat_mj_per_plant",
+          "label": "the usual schedule in an average year"
+        }
+      },
+      "cooling_kwh_per_plant": {
+        "unit": "kWh",
+        "target_min": 0,
+        "baseline": {
+          "column": "usual_cooling_kwh_per_plant",
+          "label": "the usual schedule in an average year"
+        }
+      },
+      "space_m2_weeks_per_plant": {
+        "unit": "m²·weeks",
+        "target_min": 0
+      }
+    },
+    "units": {
+      "light_mol": "mol/m²/day",
+      "weeks_phase_1": "weeks",
+      "weeks_phase_2": "weeks",
+      "temp_warm_c": "°C",
+      "weeks_cooling": "weeks",
+      "temp_cooling_c": "°C",
+      "heat_price_eur_mj": "€/MJ",
+      "electricity_price_eur_kwh": "€/kWh",
+      "space_cost_eur_m2_week": "€/m²/week",
+      "price_plant_eur": "€/plant",
+      "two_spike_premium_eur": "€/plant"
+    }
+  },
+  "model": {
+    "runner": "onnx",
+    "version": "latest"
+  },
+  "policy": {
+    "contains_personal_data": false,
+    "reject_unknown_fields": true,
+    "log_feature_values": true
+  },
+  "scenario": {
+    "levers": {
+      "weeks_phase_1": {
+        "label": "Weeks in phase 1 (raising)",
+        "unit": "weeks",
+        "min": 10,
+        "max": 20,
+        "step": 1,
+        "effects": {
+          "spikes_per_plant": "increasing",
+          "weeks_to_sale": "increasing",
+          "space_m2_weeks_per_plant": "increasing",
+          "heat_mj_per_plant": "increasing",
+          "two_spike_share": "increasing"
+        }
+      },
+      "weeks_phase_2": {
+        "label": "Weeks in phase 2 (warm growth)",
+        "unit": "weeks",
+        "min": 8,
+        "max": 18,
+        "step": 1,
+        "effects": {
+          "spikes_per_plant": "increasing",
+          "weeks_to_sale": "increasing",
+          "space_m2_weeks_per_plant": "increasing",
+          "heat_mj_per_plant": "increasing",
+          "two_spike_share": "increasing"
+        }
+      },
+      "temp_warm_c": {
+        "label": "Temperature in the warm phases",
+        "unit": "°C",
+        "min": 26,
+        "max": 31,
+        "step": 0.5,
+        "effects": {
+          "heat_mj_per_plant": "increasing"
+        }
+      },
+      "weeks_cooling": {
+        "label": "Weeks of cooling (phase 3)",
+        "unit": "weeks",
+        "min": 4,
+        "max": 10,
+        "step": 1,
+        "effects": {
+          "spikes_per_plant": "increasing",
+          "two_spike_share": "increasing"
+        }
+      },
+      "temp_cooling_c": {
+        "label": "Cooling temperature (phase 3)",
+        "unit": "°C",
+        "min": 17,
+        "max": 23,
+        "step": 0.5,
+        "effects": {
+          "cooling_kwh_per_plant": "decreasing",
+          "heat_mj_per_plant": "increasing",
+          "weeks_to_sale": "decreasing"
+        }
+      }
+    },
+    "outputs": {
+      "spikes_per_plant": {
+        "label": "Spikes per plant"
+      },
+      "sellable_share": {
+        "label": "Plants that can be sold",
+        "price_from": "price_plant_eur"
+      },
+      "two_spike_share": {
+        "label": "Plants with two or more spikes",
+        "price_from": "two_spike_premium_eur"
+      },
+      "weeks_to_sale": {
+        "label": "Weeks to sale"
+      },
+      "heat_mj_per_plant": {
+        "label": "Heating per plant",
+        "price_from": "heat_price_eur_mj",
+        "is_cost": true
+      },
+      "cooling_kwh_per_plant": {
+        "label": "Cooling electricity per plant",
+        "price_from": "electricity_price_eur_kwh",
+        "is_cost": true
+      },
+      "space_m2_weeks_per_plant": {
+        "label": "Space per plant",
+        "price_from": "space_cost_eur_m2_week",
+        "is_cost": true
+      }
+    },
+    "case_label": "batches"
+  }
+}

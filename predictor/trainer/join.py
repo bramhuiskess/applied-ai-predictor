@@ -54,7 +54,7 @@ def read_lookup(manifest: Manifest, join: JoinConfig) -> tuple[Path, pd.DataFram
     path = Path(join.source.path)
     if not path.is_file():
         raise TrainingError(f"{manifest.use_case_id}: lookup table {path} of join {join.name!r} not found")
-    return path, read_table(join.source.adapter, path)
+    return path, read_table(join.source.adapter, path, allow_empty=True)
 
 
 def apply_joins(manifest: Manifest, df: pd.DataFrame, *, raise_on_error: bool = True) -> AppliedJoins:

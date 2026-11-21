@@ -363,24 +363,29 @@ model never saw, net result per m² over 5 months compared with keeping the curr
 
 | | advice given | promised | **true gain** | share of the best possible | advice that made it worse |
 |---|---|---|---|---|---|
-| the finder (default) | 78% of cases | +€2.65 | **+€2.09** | 73% | 6% |
-| advising every gain, however small | 100% | +€2.79 | +€2.10 | 73% | 14% |
-| only plans with at least medium certainty | 78% | +€1.05 | +€0.60 | 21% | 18% |
-| the best plan in hindsight | | | +€2.88 | 100% | |
+| the finder (default) | 92% of cases | +€6.53 | **+€6.09** | 86% | 3% |
+| advising every gain, however small | 93% | +€6.54 | +€6.09 | 86% | 4% |
+| only plans with at least medium certainty | 48% | +€1.73 | +€1.40 | 20% | 3% |
+| the best plan in hindsight | | | +€7.07 | 100% | |
 
-*Re-measured after the heating model's blend got its own mix (`docs/technical.md`, model choice): before, the
-finder gave +€2.03 (70%) and 10% of its advice made things worse.*
+*Measured with categories in linear models and the blend's own mix (`docs/technical.md`, model choice). Before
+those, the finder gave +€5.54 (78%) and 4% of its advice made things worse.*
 
 What this shows:
 
-- **Following the advice pays**: about 73% of what hindsight would have given.
-- **It promises about a quarter too much** (+€2.65 promised, +€2.09 real). That is the price of choosing the
-  best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper estimate.
-- **Small gains are not worth acting on.** Of the advice that promised less than €1/m², about 4 in 10 made
-  things worse; above €2/m² almost none did. Hence `min_gain`: below it the advice is "keep the current settings".
-- **A limit on certainty did not help here**: it removed two thirds of the gain and the advice that was left
+- **Following the advice pays**: about 86% of what hindsight would have given.
+- **It promises more than it delivers** (+€6.53 promised, +€6.09 real, 7% too much). That is the price of
+  choosing the best of 209 predictions: the winner is partly the luckiest. Read the promised gain as an upper
+  estimate.
+- **Small gains are not worth acting on.** In an earlier version of the simulator, where gains were smaller, about
+  4 in 10 of the advice that promised less than €1/m² made things worse; above €2/m² almost none did. Hence
+  `min_gain`: below it the advice is "keep the current settings".
+- **A limit on certainty did not help here**: it removed three quarters of the gain and the advice that was left
   was not more reliable. It is available, but off by default. Plans with an input outside the training data
   are always left out.
+
+(The gains are larger than in the first version of this test, +€2.03, because the simulator's lamp rule was
+corrected on the real lamp logs: lamps now matter more, so there is more to win or lose with them.)
 
 This is measured in the simulator, where the true result of every plan is known. For a real greenhouse nobody
 can know what the other 208 plans would have given.
@@ -402,9 +407,42 @@ re-simulates the advised plan, with and without the refinement (net result per b
 | grid + refinement (default) | 1,196 | €66,850 | **€35,459** (+5.1%) | 17.5% |
 
 The refinement pays without making the advice less reliable. Note what the same table shows about the nursery
-models: the finder promises about twice what the simulator gives back (the tomato-season finder: a quarter too
-much), and about one in six pieces of advice makes things worse. Read the nursery advice as a direction, not a
-promise.
+models: the finder promises about twice what the simulator gives back (the tomato-season finder: 7% too much),
+and about one in six pieces of advice makes things worse. Read the nursery advice as a direction, not a promise.
+
+orchid-batch has five levers too. On 40 unseen batches, re-simulated in the crop model: grid only €0.274 per
+plant, with the refinement **€0.326** (+19%), better on 39 batches and worse on none. Cooling moves from 19 °C to
+20 °C, a value the grid never tries.
+
+## Inputs nobody knows yet: assumptions
+
+Some inputs matter a lot and are unknown on the day of the question, such as the sun of the coming months. Hiding
+them makes the model's error look like bad luck; asking the caller for them is asking the impossible. So the
+manifest can name them:
+
+```json
+"scenario": {"assumptions": {"sun_ahead_ratio": {
+    "label": "Sun in the coming five months, against a normal year",
+    "typical": 1.0, "low": 0.91, "high": 1.085, "low_label": "a dark year", "high_label": "a sunny year"}}}
+```
+
+The model is trained with what really came. When asking, the caller leaves the input out. The service then:
+
+- uses `typical` and says so (`assumed`);
+- adds an `outlook` to every number: what it would be at `low` and at `high`;
+- makes the range run from the lowest of those minus the model's own half-width to the highest plus it.
+
+```json
+"harvest_5_months_kg_m2": {"value": 12.7, "outlook": {"a dark year": 12.1, "a sunny year": 13.3},
+                           "range": {"low": 11.1, "high": 14.2, "level": 0.8}}
+```
+
+A caller who does know (a season forecast, or a what-if: "and in a dark year?") sends the input and gets the
+narrow range without an outlook. An assumption cannot also be a lever: a lever is chosen, an assumption is not
+known. The best-plan finder plans for the usual value.
+
+Why it matters: before this, the 80% range of the tomato forecast held in 52-81% of the cases in the two test
+years, because the error was mostly "which year was it". With the sun as an assumption it holds in 76-87%.
 
 ### Not in this ticket
 

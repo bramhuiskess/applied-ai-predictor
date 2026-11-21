@@ -83,12 +83,17 @@ def half_width(spec: dict[str, Any] | None, certainty_level: str | None = None) 
 
 
 def around(spec: dict[str, Any] | None, value: float, certainty_level: str | None = None,
-           bounds: list[float | None] | None = None) -> dict[str, Any] | None:
-    """`{"low": .., "high": .., "level": 0.8}` for a predicted value, kept within the target's physical limits."""
+           bounds: list[float | None] | None = None, also: list[float] | None = None) -> dict[str, Any] | None:
+    """`{"low": .., "high": .., "level": 0.8}` for a predicted value, kept within the target's physical limits.
+
+    `also` are the values under other assumptions about an unknown input (a dark year, a sunny year): the
+    range then runs from the lowest of them minus the half-width to the highest plus the half-width.
+    """
     width = half_width(spec, certainty_level)
     if width is None:
         return None
-    low, high = value - width, value + width
+    values = [value, *(also or [])]
+    low, high = min(values) - width, max(values) + width
     if bounds:
         low = max(low, bounds[0]) if bounds[0] is not None else low
         high = min(high, bounds[1]) if bounds[1] is not None else high

@@ -56,14 +56,24 @@ SCENARIOS = {"1 degree warmer": {"temp_plan_c": 1.0}, "1 degree colder": {"temp_
              "4 lamp hours more": {"lamp_hours_plan": 4.0}, "4 lamp hours less": {"lamp_hours_plan": -4.0}}
 
 
-def lamp_hours(radiation: np.ndarray, hours_on_dark_days: float) -> np.ndarray:
-    """Growers light on dark days and switch off as the sun takes over (as in the real data: 16 h in winter, 0 in May)."""
+LAMPS_OFF_ABOVE_J_CM2, LAMPS_RAMP_J_CM2 = 2550.0, 1690.0
+
+
+def lamp_hours(radiation: np.ndarray, hours_on_dark_days: float, habit: float = 1.0) -> np.ndarray:
+    """Growers light on dark days and switch off as the sun takes over.
+
+    Fitted on the lamp logs of the six real greenhouses: full hours up to a weekly average of about 860 J/cm2
+    of sun per day, then tapering to off at 2,550. (A first guess of "off at 1,500" gave 10% too little light,
+    which the replay of the real season showed as a harvest forecast that was 15% too low.)
+    """
     week = pd.Series(radiation).rolling(7, min_periods=1).mean().to_numpy()
-    return hours_on_dark_days * np.clip((1500.0 - week) / 900.0, 0.0, 1.0)
+    # `habit`: growers differ in how long they keep the lamps on as the days get brighter (6% between the real six).
+    return hours_on_dark_days * np.clip((LAMPS_OFF_ABOVE_J_CM2 * habit - week) / LAMPS_RAMP_J_CM2, 0.0, 1.0)
 
 
 def season(weather: pd.DataFrame, decision_day: int, before: tuple[float, float], after: tuple[float, float],
-           noise: np.ndarray | None = None, factor: np.ndarray | None = None) -> dict[str, float]:
+           noise: np.ndarray | None = None, factor: np.ndarray | None = None, yield_factor: float = 1.0,
+           lamp_habit: float = 1.0) -> dict[str, float]:
     """Run one season with a plan before and after the decision day.
 
     `weather` starts HISTORY_DAYS before planting (the greenhouse was in use then too). Returns the harvest and
@@ -73,11 +83,11 @@ def season(weather: pd.DataFrame, decision_day: int, before: tuple[float, float]
     temp_plan = np.where(days < decision_day, before[0], after[0])
     hours = np.where(days < decision_day, before[1], after[1])
     radiation, outside = weather["radiation_j_cm2"].to_numpy(), weather["temp_mean_c"].to_numpy()
-    lamps = lamp_hours(radiation, 1.0) * hours
+    lamps = lamp_hours(radiation, 1.0, lamp_habit) * hours
     # The greenhouse follows the plan; on warm days it cannot stay below the outside temperature plus sun warmth.
     temp = np.maximum(temp_plan + (noise if noise is not None else 0.0), outside + 4.0)
     crop_days = days >= 0
-    harvest = crop.simulate(temp[crop_days], crop.light_at_crop(radiation[crop_days], lamps[crop_days]))
+    harvest = crop.simulate(temp[crop_days], crop.light_at_crop(radiation[crop_days], lamps[crop_days])) * yield_factor
     lamp_kwh = lamps * heating.KWH_PER_LAMP_HOUR
     heat = heating.heat_balance(temp, outside, radiation, lamp_kwh) * (factor if factor is not None else 1.0)
     start = decision_day + HISTORY_DAYS
@@ -85,7 +95,27 @@ def season(weather: pd.DataFrame, decision_day: int, before: tuple[float, float]
     result["heating_5_months_mj_m2"] = float(heat[start: start + 152].sum())
     result["electricity_5_months_kwh_m2"] = float(lamp_kwh[start: start + 152].sum())
     result["heat_last_4_weeks_mj_m2"] = float(heat[start - HISTORY_DAYS: start].sum())
+    # What the grower has seen so far: the sun of the last four weeks and what he has harvested.
+    result["sun_last_4_weeks_j_cm2"] = float(radiation[start - HISTORY_DAYS: start].mean())
+    result["harvest_so_far_kg_m2"] = float(harvest[:decision_day].sum())
+    result["sun_ahead_j_cm2"] = float(radiation[start: start + 152].mean())
     return result
+
+
+YIELD_SPREAD = 0.045    # real greenhouses differ this much from the crop model (3.7% on a season, each left out)
+
+
+LAMP_HABIT_SPREAD = 0.06
+
+
+def own_lamp_habit(seed: int) -> float:
+    """Whether this grower switches the lamps off sooner or later than most (not known to the forecast)."""
+    return float(np.exp(np.random.default_rng(seed + 2).normal(0.0, LAMP_HABIT_SPREAD)))
+
+
+def own_yield_factor(seed: int) -> float:
+    """How much more or less this greenhouse harvests than the crop model says (plants, labour, cultivar)."""
+    return float(np.exp(np.random.default_rng(seed + 1).normal(0.0, YIELD_SPREAD)))
 
 
 def own_factor_path(seed: int, length: int) -> np.ndarray:
@@ -142,7 +172,8 @@ def generate(daily: pd.DataFrame, seasons: int = 4000, seed: int = 11) -> pd.Dat
         if planting > last_planting or planting < first_planting:
             continue
         weather = _window(daily, planting)
-        outcome = season(weather, decision_day, before, after, noise, own_factor_path(greenhouse_seed, length))
+        outcome = season(weather, decision_day, before, after, noise, own_factor_path(greenhouse_seed, length),
+                         own_yield_factor(greenhouse_seed), own_lamp_habit(greenhouse_seed))
         # The plain guess: a normal plan in an average year and an average greenhouse, from the same point in the season.
         doy = weather["date"].dt.day_of_year.clip(upper=365).to_numpy()
         average_year = pd.DataFrame({"temp_mean_c": normal["temp_mean_c"].reindex(doy).to_numpy(),
@@ -155,6 +186,11 @@ def generate(daily: pd.DataFrame, seasons: int = 4000, seed: int = 11) -> pd.Dat
             "decision_week": int(decision.isocalendar().week), "days_since_planting": decision_day,
             "temp_so_far_c": round(before[0], 2), "lamp_hours_so_far": round(before[1], 1),
             "heat_last_4_weeks_mj_m2": round(outcome["heat_last_4_weeks_mj_m2"], 2),
+            "sun_last_4_weeks_j_cm2": round(outcome["sun_last_4_weeks_j_cm2"], 1),
+            "harvest_so_far_kg_m2": round(outcome["harvest_so_far_kg_m2"], 3),
+            # The sun of the coming five months against a normal year: unknown on the decision day. In the data it is
+            # what really came; when asking, leave it at 1.0 (a normal year) or try a dark or a sunny one.
+            "sun_ahead_ratio": round(outcome["sun_ahead_j_cm2"] / usual["sun_ahead_j_cm2"], 3),
             "temp_plan_c": round(after[0], 2), "lamp_hours_plan": round(after[1], 1),
             **prices(rng, decision),
             **{f"usual_{name}": round(usual[name], 3) for name in OUTPUTS},
@@ -170,7 +206,8 @@ def counterfactual(row: pd.Series, daily: pd.DataFrame, **changes: float) -> dic
     after = (float(row["temp_plan_c"]) + changes.get("temp_plan_c", 0.0),
              float(np.clip(float(row["lamp_hours_plan"]) + changes.get("lamp_hours_plan", 0.0), 0, 24)))
     factor = own_factor_path(int(row["greenhouse_seed"]), len(weather))        # the same greenhouse
-    return season(weather, int(row["days_since_planting"]), before, after, factor=factor)
+    return season(weather, int(row["days_since_planting"]), before, after, factor=factor,
+                  yield_factor=own_yield_factor(int(row["greenhouse_seed"])), lamp_habit=own_lamp_habit(int(row["greenhouse_seed"])))
 
 
 def net_eur(row: pd.Series, outcome: dict[str, float]) -> float:

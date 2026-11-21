@@ -46,10 +46,11 @@ Python 3.11 or newer is required (macOS's built-in 3.9 does not work; `brew inst
 python scripts/make_datasets.py   # writes data/*.csv (downloads AI4I 2020 once)
 python scripts/make_nursery.py && python scripts/make_arable.py   # scenario datasets (KNMI/CBS)
 python scripts/make_tomato_season.py                              # harvest months ahead (crop model on KNMI weather)
+python scripts/make_orchid.py                                     # pot-orchid batches through three phases
 python scripts/make_greenhouse_challenge.py                       # real greenhouse data (WUR, 8 MB)
 predictor train                   # trains every use case in usecases/
 predictor serve                   # dashboard on http://127.0.0.1:8000, API docs on /docs
-pytest                            # 443 tests, ~2.5 min, fully offline
+pytest                            # 515 tests, ~2.5 min, fully offline
 ```
 
 ### Technical notebook
