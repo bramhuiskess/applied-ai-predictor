@@ -275,7 +275,7 @@ harvest curves. Tested by leaving each real greenhouse out in turn:
 
 ![Crop model against the real harvests](img/tomato_crop_model.png)
 
-`scripts/make_tomato_season.py` runs that crop model for 3,655 decisions on real KNMI weather of ten years.
+`scripts/make_tomato_season.py` runs that crop model for 3,614 decisions on real KNMI weather of ten years.
 One row is one decision: a greenhouse some weeks into its season, the settings so far and the plan from now
 on (temperature, lamp hours); the outputs are the harvest in the next 1, 3 and 5 months. The weather of
 those months is not an input, because nobody knows it in advance, so the model's error is an honest margin
@@ -283,19 +283,19 @@ for a forecast months ahead. Tested on weather years it never saw (2023-2025):
 
 | Harvest in the next | typical error | plain guess: a normal plan in an average year | better |
 |---|---|---|---|
-| 1 month | 0.09 kg/m² | 0.23 | 62% |
-| 3 months | 0.36 kg/m² | 0.74 | 51% |
-| 5 months | **0.68 kg/m² (5.5%)** | 1.05 | 35% |
+| 1 month | 0.10 kg/m² | 0.25 | 62% |
+| 3 months | 0.41 kg/m² | 0.89 | 54% |
+| 5 months | **0.64 kg/m² (4.6%)** | 1.45 | 56% |
 
 The simulator is also the answer key (`python scripts/make_tomato_season.py --check`, scenarios through
 the real engine on test decisions):
 
 | Scenario from now on | harvest in 5 months: crop model | trained model | right direction |
 |---|---|---|---|
-| 4 lamp hours more | +4.6% | +5.2% | 100% |
-| 4 lamp hours less | −4.5% | −5.5% | 100% |
-| 1 °C warmer | +1.1% (next month: +4.9%) | +0.7% (next month: +3.6%) | 72% (next month: 84%) |
-| 1 °C colder | −1.2% (next month: −5.1%) | −1.3% (next month: −4.4%) | 87% (next month: 88%) |
+| 4 lamp hours more | +7.5% | +7.9% | 100% |
+| 4 lamp hours less | −7.8% | −7.9% | 100% |
+| 1 °C warmer | +1.4% | +1.9% | 100% |
+| 1 °C colder | −1.7% | −2.0% | 100% |
 
 #### The net result of a plan, in euros
 
@@ -304,8 +304,10 @@ books what the next 5 months cost, and the use case has five outputs: harvest in
 (MJ/m²) and lamp electricity (kWh/m²) in the next 5 months. The grower's own prices are inputs
 (`tomato_price_eur_kg`, `heat_price_eur_mj`, `electricity_price_eur_kwh`), so one scenario answers in money:
 
-> 1 degree warmer: harvest in the next 5 months 1.1% higher (+0.12 kg/m², worth +€0.41); heating 11.1% higher
-> (+23.9 MJ/m², worth −€0.44); lamp electricity worth −€0.05. **Net worth −€0.08 per m².**
+> 1 degree warmer from now on: harvest in the next 5 months 1.5% higher (+0.26 kg/m², worth +€0.79); heating 9.9%
+> higher (+35.0 MJ/m², worth −€0.29); lamp electricity worth −€0.25. **Net worth +€0.26 per m².**
+>
+> (the real growers' compartment on 10 February 2020, at the challenge's prices)
 
 - **Heating** comes from a heat balance fitted on the real greenhouses (`scripts/greenhouse_heat.py`): loss
   through the glass minus sun and lamp heat, plus a base use, **times the greenhouse's own factor**. Growers
@@ -327,22 +329,67 @@ On weather years the model never saw (2023-2025):
 
 | Next 5 months | typical error | plain guess: a normal plan in an average year | better |
 |---|---|---|---|
-| harvest | 0.65 kg/m² (5.3%) | 1.03 | 37% |
-| heating | 53 MJ/m² (20%) | 102 | 48% |
-| lamp electricity | 13 kWh/m² (15%) | 26 | 51% |
+| harvest | 0.64 kg/m² (4.6%) | 1.45 | 56% |
+| heating | 43 MJ/m² (19%) | 95 | 55% |
+| lamp electricity | 14 kWh/m² (9%) | 49 | 71% |
 
 And the net result against the answer key (`--check`, per m² over 5 months):
 
 | Scenario from now on | true net change | predicted | right direction |
 |---|---|---|---|
-| 4 lamp hours more | −€0.49 | −€0.43 | 86% |
-| 4 lamp hours less | +€0.42 | +€0.38 | 77% |
-| 1 °C warmer | +€0.03 | +€0.03 | 59% |
-| 1 °C colder | −€0.08 | −€0.03 | 66% |
+| 4 lamp hours more | −€1.99 | −€2.38 | 91% |
+| 4 lamp hours less | +€1.80 | +€1.89 | 89% |
+| 1 °C warmer | +€0.21 | +€0.41 | 78% |
+| 1 °C colder | −€0.33 | −€0.48 | 85% |
 
-Read it like this: at these prices extra lamp hours cost more than they bring, and the model sees that. One
-degree of temperature is almost neutral in money (a little more and earlier harvest against more heating), so
-there the sign is close to a coin flip, and the response says the effect is within the margin.
+Read it like this: at these prices four extra lamp hours cost about €2 per m² more than they bring, and the
+model sees that. One degree warmer is a small plus (a little more and earlier harvest against more heating).
+
+#### Replaying a real season: what would it have told the growers?
+
+The numbers above are measured inside the simulator. `python scripts/replay_real_season.py` does the test that
+counts: the six real compartments of 2019-2020. On a decision day early in the season the product gets only
+what a grower knew that day (settings so far, the plan he then really followed, his heating of the last weeks)
+and its forecast is compared with what was really measured afterwards. The forecasting model never saw these
+greenhouses; the crop model and heat balance behind its simulator were fitted on them (six numbers in all).
+
+| Forecast on days 14 to 84 of the season | error against the real outcome | plain guess: a normal plan in an average year | real outcome inside the 80% range |
+|---|---|---|---|
+| harvest, next month | **11%** | 14% | 68% |
+| harvest, next 3 months | 8% | 8% | 75% |
+| harvest, next 5 months | **10%** (all six too low) | 14% | 25% |
+| heating, next 5 months | **27%** | 32% | 75% |
+| lamp electricity, next 5 months | **5%** | 12% | 100% |
+
+One case as a grower would see it: the growers' own compartment on 10 February 2020. Forecast for the next three
+months: 9.6 kg/m². Really harvested: 9.61 kg/m².
+
+What this real season taught us, in three rounds:
+
+1. **The first replay was 18% too low on the 5-month harvest.** One assumption in the simulator was wrong: it
+   switched the lamps off too early in spring, so it assumed 10% less light than these growers gave. The lamp
+   rule is now fitted on the real lamp logs (and growers differ 6% in it, which the simulator now has too).
+   That brought it to 10%. For harvest and electricity this replay is therefore not an independent test of that rule.
+2. **What the grower already knows helps, but only once there is something to know.** The forecast now also
+   gets the sun of the last four weeks and the harvest so far. With harvest history the margin over the plain
+   guess is clear: next month's harvest on day 84 is 9% off against 14%, and three months ahead on day 56 it is
+   6% against 10%. Before the first harvest (days 14 and 28) the plain guess is still better for the next
+   three months (5% against 8-12%): that window hangs on the day of the first harvest, and a few days is a lot.
+3. **The weather ahead is now an assumption, not a hidden error.** The sun of the coming five months is an
+   input (`sun_ahead_ratio`, 1.0 = a normal year) that the caller leaves out. The product then assumes a normal
+   year, shows every number for a dark and a sunny year (the 10th and 90th percentile of ten years), and makes
+   the range hold both. On the simulator's test years the real outcome is now inside the 80% range in 76-87%
+   of the cases (was 52-81%); on this real season in 68-100%, except the 5-month harvest (25%, was 0%).
+
+What is left, plainly:
+
+- **The 5-month harvest is 10% too low for all six compartments, also when the sun is known (8%).** March to May
+  2020 was the sunniest spring of the ten years (19% more radiation), but that explains only part. The rest is
+  the step from a plan ("23 °C, 16 lamp hours") to what a greenhouse really does every day.
+- **Heating varies a lot between runs** (20% and 27% in two trainings, with only six cases): one compartment
+  that heats very differently decides the number.
+- The harvest is compared without the trial's final clean-up harvest of unripe trusses.
+- One season, six compartments, one location.
 
 What the money view leaves out: labour, CO₂, plants, depreciation, and that a tomato harvested in January pays
 more than one in May (the price is one average per decision).
@@ -351,6 +398,65 @@ Limits, plainly: the crop model stands on one season of one crop (temperatures o
 planted in December, about 5.5 months). Beyond that, for example a summer or a 10-month crop, it is crop
 knowledge that speaks, not measured data. CO₂, humidity, diseases and fruit quality are not in it. The
 euro value uses an assumed 2.50 €/kg. A grower's own harvest records would replace the calibration.
+
+### A crop with phases: the pot orchid (`orchid-batch`)
+
+The grower's own crop is a pot orchid (Phalaenopsis), and it goes through phases, each in its own environment:
+raising the young plants, warm growth, and cooling to make the plant flower. His questions are *when* to move
+a batch to the next phase and *at what temperature*.
+
+**There is no open orchid dataset, so this crop model is not fitted on measurements.** `scripts/orchid_crop.py`
+is built on published research and Dutch practice, and its docstring says per relation where it comes from and
+which numbers are our own assumption. It is a demonstration that the product handles a crop with phases; the
+grower's own batch records would replace the numbers.
+
+| Published | In the model |
+|---|---|
+| Warm phases at a constant 28 °C keep the plant vegetative; 31 °C gives more leaves ([WUR](https://edepot.wur.nl/415899); [Lee et al. 2021](https://pmc.ncbi.nlm.nih.gov/articles/PMC8112652)) | leaves per week rise with temperature and light |
+| A day temperature of 29 °C or more prevents flowering, 26 °C or less induces it ([Blanchard 2005](https://d.lib.msu.edu/etd/33887/FULL_TEXT/view)) | cooling at 29 °C: no plants to sell; a warm phase below 27 °C: early spikes |
+| Cooling is about 8 weeks at 19 °C, then about 10 weeks at 21 °C; 8 weeks always gave more multi-spike plants; 22 °C can replace 19 °C in part ([Kas als Energiebron](https://kasalsenergiebron.nl/content/research/Eindrapport_13499.pdf); [WUR](https://edepot.wur.nl/163349)) | two-spike share falls with shorter or warmer cooling; the usual schedule takes 46 weeks |
+| 3, 4, 5 mol of light in the warm phases gave 1.88, 1.92, 2.03 spikes per plant ([WUR](https://edepot.wur.nl/178716)) | 1.82, 1.92, 2.00 |
+
+One row of `data/orchid_batches.csv` is one batch on real KNMI weather: the weeks in phase 1 and 2, the warm
+temperature, the weeks and temperature of cooling, the light of the greenhouse, and the grower's prices. Outputs:
+plants that can be sold, plants with two or more spikes (the better-paid class), spikes per plant, weeks to sale,
+and heating, cooling electricity and space per plant. A batch cooled in summer costs electricity, one raised in
+winter costs heat (the heat balance fitted on the real greenhouses).
+
+On batches of years the model never saw (2023-2024):
+
+| | typical error | plain guess: the usual schedule in an average year | better |
+|---|---|---|---|
+| plants with two or more spikes | 3 of 100 plants | | R² 0.95 |
+| weeks to sale | 0.4 weeks | 2.6 | 83% |
+| heating per plant | 0.61 MJ | 0.99 | 38% |
+| cooling electricity per plant | 0.08 kWh | 0.11 | 32% |
+
+Scenarios against the answer key (`python scripts/make_orchid.py --check`, net result per plant):
+
+| Scenario | true | predicted | right direction |
+|---|---|---|---|
+| cooling 2 weeks shorter | −€0.22 | −€0.22 | 99% |
+| cooling 2 °C warmer | −€0.10 | −€0.10 | 93% |
+| warm phases 1.5 °C colder | −€0.12 | −€0.10 | 98% |
+| 2 weeks longer warm growth | −€0.00 | −€0.01 | 83% |
+
+And the best-plan finder (`--check-finder`, 80 batches, compared with the batch's own schedule): following its
+advice gains **€0.25 per plant** on the true outcomes, 80% of the best possible in hindsight (€0.31), and none
+of the advice made a batch worse. Without being told, it proposes what Dutch growers do: about 17 weeks of
+raising, 11 weeks of warm growth, then 8 weeks of cooling at 19 °C, and a longer warm phase for greenhouses
+with less light.
+
+Two things we had to get right in the money, or the finder gave nonsense:
+
+- **Space has a real price.** With a low price per m² per week the longest schedule always looked best per
+  plant. A square metre also costs the next batch that has to wait.
+- **Plants are paid by class, not per spike.** Paying per spike made ever bigger plants ever better. A plant
+  with two spikes earns a premium; a third spike hardly pays.
+
+Limits: not validated on real orchids. It proposes 30-31 °C in the warm phases, because the model only knows
+"more leaves at 31 °C"; growers stay at 28 °C for reasons that are not in it (plant quality, disease, energy
+contracts). Cultivars differ a lot; there is one here. Phase 3 includes the finishing at 21 °C until sale.
 
 ### The final test: another year, nothing tuned on it
 

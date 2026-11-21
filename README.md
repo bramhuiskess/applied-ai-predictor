@@ -43,7 +43,7 @@ Zonder Docker kan ook (`./scripts/setup.sh`, vereist Python 3.11+), zie [`docs/t
 - nieuwe dataset toevoegen: `predictor init` → `predictor train` → klaar, zonder code aan te passen
 - privacyregels per use case (bijv. geen `diagnosis`-veld, geen groepjes kleiner dan 5)
 - dashboard met grafieken per use case en een "probeer het zelf"-paneel met de JSON erbij
-- 431 tests, die draaien ook op GitHub Actions
+- 452 tests, die draaien ook op GitHub Actions
 
 ## Datasets voor scenario-voorspelling
 
@@ -59,11 +59,14 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
   (1 graad warmer = 2,9 dagen eerder). Zelf nalopen: `python scripts/check_greenhouse.py`
 - **oogst maanden vooruit** (`tomato-season`): een gewasmodel dat is afgesteld en getest op de echte kassen
   (seizoenstotaal 3,7% ernaast op een kas die het nooit zag), gedraaid op 10 jaar echt KNMI-weer. Antwoord op
-  "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 5,5% ernaast, 35% beter dan een simpele gok.
+  "als ik nu mijn instellingen verander, wat oogst ik over 5 maanden?": 4% ernaast in de simulator. Nagespeeld op het echte seizoen 2019-20 van zes kassen: oogst over 3 maanden 8% ernaast, over 5 maanden 10%, stroom 5%, stoken 27% (`scripts/replay_real_season.py`).
   Eén scenario geeft ook het **nettoresultaat in euro's**: oogst min stook- en stroomkosten, met de eigen prijzen
-  van de teler ("1 graad warmer: oogst +€0,41, stoken −€0,44, netto −€0,08 per m²"). En het systeem zoekt zelf
+  van de teler ("1 graad warmer: oogst +€0,79, stoken −€0,29, stroom −€0,25, netto +€0,26 per m²"). En het systeem zoekt zelf
   het **beste plan** (`/scenario/best`): alle instellingen doorrekenen en het plan met het hoogste nettoresultaat
-  voorstellen. In de simulator levert het advies opvolgen +€2,03 per m² op (70% van wat achteraf maximaal kon)
+  voorstellen. In de simulator levert het advies opvolgen +€5,54 per m² op (78% van wat achteraf maximaal kon)
+- **orchidee in fases** (`orchid-batch`): een partij Phalaenopsis door opkweek, warme groei en koeling. Wanneer schuif je
+  door en op welke temperatuur? Gebouwd op gepubliceerd teeltonderzoek (geen meetdata, dus een demonstratie). De
+  planzoeker komt zelf uit op de gangbare praktijk: 8 weken koelen op 19 °C
 - **eindtest op een ander jaar** (4e Greenhouse Challenge, 2024, nergens op afgesteld): de stook- en stroommodellen
   haalden het daar niet. Daarna gefixt: het stroommodel krijgt lampgebruik (uren × vermogen) en zit nu op 4% per seizoen;
   het stookmodel zegt bij een kas zonder historie eerlijk dat je er niet op moet varen, en buiten de trainingsdata
@@ -72,7 +75,7 @@ testdatasets, zie [`docs/datasets.md`](docs/datasets.md):
 
 ```bash
 pip install -e '.[datasets]' && python scripts/make_greenhouse_challenge.py   # echte kasdata (17 MB download)
-python scripts/make_nursery.py --faults && python scripts/make_arable.py && python scripts/make_tomato_season.py && predictor train
+python scripts/make_nursery.py --faults && python scripts/make_arable.py && python scripts/make_tomato_season.py && python scripts/make_orchid.py && predictor train
 python scripts/check_scenarios.py   # klopt het model met het antwoordmodel?
 ```
 

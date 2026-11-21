@@ -70,7 +70,10 @@
       "heat_price_eur_mj": "€/MJ",
       "electricity_price_eur_kwh": "€/kWh",
       "usual_heating_5_months_mj_m2": "MJ/m²",
-      "usual_electricity_5_months_kwh_m2": "kWh/m²"
+      "usual_electricity_5_months_kwh_m2": "kWh/m²",
+      "sun_last_4_weeks_j_cm2": "J/cm²/day",
+      "harvest_so_far_kg_m2": "kg/m²",
+      "sun_ahead_ratio": "x a normal year"
     }
   },
   "model": {
@@ -131,6 +134,16 @@
         "is_cost": true
       }
     },
-    "case_label": "decisions"
+    "case_label": "decisions",
+    "assumptions": {
+      "sun_ahead_ratio": {
+        "label": "Sun in the coming five months, against a normal year",
+        "typical": 1.0,
+        "low": 0.91,
+        "high": 1.085,
+        "low_label": "a dark year",
+        "high_label": "a sunny year"
+      }
+    }
   }
 }

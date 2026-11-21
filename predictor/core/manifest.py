@@ -289,9 +289,40 @@ class ScenarioOutput(_Strict):
         return self
 
 
+class Assumption(_Strict):
+    """An input nobody knows on the day of the question, such as the sun of the coming months.
+
+    The model was trained with what really came. When asking, the caller may leave it out: the service then uses
+    `typical`, and shows next to every number what it would be at `low` and `high` (a dark and a sunny year),
+    and makes the range wide enough to hold both.
+    """
+
+    label: str
+    typical: float
+    low: float
+    high: float
+    low_label: str = "low"
+    high_label: str = "high"
+
+    @model_validator(mode="after")
+    def _check(self) -> Assumption:
+        if not self.low < self.typical < self.high:
+            raise ValueError("an assumption needs low < typical < high")
+        return self
+
+
 class ScenarioConfig(_Strict):
     levers: dict[str, Lever] = Field(min_length=1)
     outputs: dict[str, ScenarioOutput] = {}
+    # Inputs that are unknown when the question is asked (weather ahead): input name -> its usual value and spread.
+    assumptions: dict[str, Assumption] = {}
+
+    @model_validator(mode="after")
+    def _check_assumptions(self) -> ScenarioConfig:
+        both = sorted(set(self.assumptions) & set(self.levers))
+        if both:
+            raise ValueError(f"{both} cannot be both a lever and an assumption: a lever is chosen, an assumption is not known")
+        return self
     # What one row is, in the user's words ("batches", "fields"), for messages like
     # "based on 14 comparable batches in the history".
     case_label: str = Field(default="cases", min_length=1, max_length=40)

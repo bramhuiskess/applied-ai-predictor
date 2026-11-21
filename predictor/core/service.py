@@ -81,6 +81,7 @@ class _Checked:
     errors: list[FieldError]
     warnings: list[str]
     filled: dict[str, Any] | None = None  # columns the joins filled in (shown to the caller, absent without joins)
+    assumed: list[str] | None = None      # unknown inputs (weather ahead) the caller left out: set to their usual value
 
 
 class PredictionService:
@@ -159,7 +160,7 @@ class PredictionService:
             ],
             "joins": _describe_joins(uc),
             "policy": uc.manifest.policy.model_dump(),
-            "scenario": describe_scenario(uc.manifest.scenario, schema, _scenario_descriptors(uc)),
+            "scenario": _describe_scenario(uc, schema),
             "feature_schema": schema,
         }
 
@@ -205,13 +206,14 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure, rows)
+        self._add_ranges(uc, outputs, sure, rows, resolved.assumed)
         self._monitor(uc, started, predicted=len(rows), rejected=0,
                       warnings=sum(len(s.warnings) for s in resolved.scenarios), rows=rows)
         return {
             **self._header(uc),
             "base": {"record_id": base.get("record_id"), "features": resolved.base,
                      "warnings": resolved.base_warnings, "outputs": outputs[0], "certainty": sure[0]},
+            **({"assumed": _assumed_note(uc, resolved.assumed)} if resolved.assumed else {}),
             "scenarios": [self._scenario_result(uc, s.name, s.changes, s.features, s.warnings,
                                                 resolved.base, outputs[0], out, c)
                           for s, out, c in zip(resolved.scenarios, outputs[1:], sure[1:])],
@@ -264,7 +266,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure, rows)
+        self._add_ranges(uc, outputs, sure, rows, resolved.assumed)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         lever_info = next(l for l in describe_scenario(uc.manifest.scenario, uc.model.feature_schema,
                                                        _scenario_descriptors(uc))["levers"] if l["name"] == lever)
@@ -310,7 +312,7 @@ class PredictionService:
         rows = [resolved.base] + [s.features for s in resolved.scenarios]
         outputs = self._outputs(uc, rows)
         sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure, rows)
+        self._add_ranges(uc, outputs, sure, rows, resolved.assumed)
         self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
         properties = uc.model.feature_schema["properties"]
 
@@ -403,10 +405,12 @@ class PredictionService:
         if problems:
             raise RequestRejected([{"scenario": None, "field": e.field, "message": e.message} for e in problems],
                                   detail="invalid scenario request")
+        features, assumed = _assume(uc, features)
         resolved, errors = resolve_scenarios(uc.manifest.scenario, uc.model.feature_schema, features, scenarios, validate)
         if errors:
             raise RequestRejected(errors, detail="invalid scenario request")
         resolved.base_warnings[:0] = join_warnings
+        resolved.assumed = assumed
         return resolved
 
     def _outputs(self, uc: UseCase, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -427,24 +431,31 @@ class PredictionService:
 
     @staticmethod
     def _add_ranges(uc: UseCase, outputs: list[dict[str, Any]], sure: list[dict[str, Any] | None],
-                    rows: list[dict[str, Any]]) -> None:
+                    rows: list[dict[str, Any]], assumed: list[str] | None = None) -> None:
         """Put the 80% range next to every regression value, as wide as the row's certainty asks for.
 
         A row outside the values the model was trained on gets no range: its error there was never measured.
+        Where the caller left an unknown input open (`assumed`, e.g. the sun ahead), every value also gets an
+        outlook (what it would be in a dark and in a sunny year) and the range is made wide enough to hold both.
         """
         properties = uc.model.feature_schema["properties"]
         outside = [ranges.outside_training(properties, row) for row in rows]
+        outlook = _outlook(uc, rows, assumed)
         for om in uc.model.outputs.values():
             spec = om.descriptor.get("range")
-            if not spec:
-                continue
             target = om.descriptor.get("target_name") or om.name
-            for out, c, beyond in zip(outputs, sure, outside):
+            for i, (out, c, beyond) in enumerate(zip(outputs, sure, outside)):
+                alternatives = outlook.get(om.name, [{}] * len(rows))[i]
+                if alternatives:
+                    out[target]["outlook"] = alternatives
+                if not spec:
+                    continue
                 if beyond:
                     out[target]["range"], out[target]["range_note"] = None, ranges.unavailable_note(beyond)
                     continue
                 level = (c.get("by_output", {}).get(om.name) or c)["level"] if c else None
-                around = ranges.around(spec, out[target]["value"], level, om.descriptor.get("target_bounds"))
+                around = ranges.around(spec, out[target]["value"], level, om.descriptor.get("target_bounds"),
+                                       also=list(alternatives.values()))
                 if around:
                     out[target]["range"] = around
 
@@ -542,12 +553,13 @@ class PredictionService:
         features, join_errors, join_warnings = _enrich(uc, features)
         if join_errors:
             return _Checked(record_id, features, join_errors, [])
+        features, assumed = _assume(uc, features)
         filled = _filled_in(uc, sent, features)
         errors = check_record(uc.manifest.policy, features)  # e.g. a group size that was joined in
         if errors:
             return _Checked(record_id, features, errors, [])
         errors, warnings = uc.validator.validate(features)
-        return _Checked(record_id, features, errors, [*join_warnings, *warnings], filled)
+        return _Checked(record_id, features, errors, [*join_warnings, *warnings], filled, assumed)
 
     def _run(self, uc: UseCase, checked: list[_Checked]) -> list[dict[str, Any]]:
         """One prediction per record. One output keeps the flat shape; several give an ``outputs`` map."""
@@ -558,6 +570,9 @@ class PredictionService:
         levels = {name: [certainty(n)["level"] for n in index.comparable(matrix)] for name, index in (uc.supports or {}).items()}
         properties = uc.model.feature_schema["properties"]
         outside = [ranges.outside_training(properties, c.features) for c in checked]
+        # Unknown inputs the callers left open: per output and record, the value in e.g. a dark and a sunny year.
+        open_inputs = sorted({name for c in checked for name in (c.assumed or [])})
+        outlook = _outlook(uc, [c.features for c in checked], open_inputs)
         for om in uc.model.outputs.values():
             output = om.runner.predict(matrix)
             task = om.descriptor["task_type"]
@@ -566,11 +581,15 @@ class PredictionService:
                 if task == "regression":
                     value, warning = self._bounded(om.descriptor, float(output.values[i]))
                     part["prediction"] = round(value, 6)
+                    alternatives = ({k: v for k, v in outlook[om.name][i].items()}
+                                    if om.name in outlook and c.assumed else {})
+                    if alternatives:
+                        part["outlook"] = alternatives
                     if om.descriptor.get("range") and outside[i]:
                         part["range"], part["range_note"] = None, ranges.unavailable_note(outside[i])
                     else:
                         around = ranges.around(om.descriptor.get("range"), value, levels[om.name][i] if om.name in levels else None,
-                                               om.descriptor.get("target_bounds"))
+                                               om.descriptor.get("target_bounds"), also=list(alternatives.values()))
                         if around:
                             part["range"] = around
                     if warning:
@@ -587,6 +606,8 @@ class PredictionService:
                     results[i].update(part)
         for item, c in zip(results, checked):
             item["warnings"] = c.warnings
+            if c.assumed:
+                item["assumed"] = _assumed_note(uc, c.assumed)
             if c.filled:
                 item["filled_in"] = c.filled
         return results
@@ -720,3 +741,52 @@ def _price(config: Any, row: dict[str, Any]) -> float | None:
     if config.price_from and row.get(config.price_from) is not None:
         return float(row[config.price_from])
     return None
+
+
+# ------------------------------------------------------------------------------ unknown inputs (weather ahead)
+
+def _assume(uc: UseCase, features: Any) -> tuple[Any, list[str]]:
+    """Set the unknown inputs the caller left out to their usual value; return which ones."""
+    scenario = uc.manifest.scenario
+    if scenario is None or not scenario.assumptions or not isinstance(features, dict):
+        return features, []
+    left_out = [name for name in scenario.assumptions if features.get(name) is None]
+    if not left_out:
+        return features, []
+    return {**features, **{name: scenario.assumptions[name].typical for name in left_out}}, left_out
+
+
+def _outlook(uc: UseCase, rows: list[dict[str, Any]], assumed: list[str] | None) -> dict[str, list[dict[str, float]]]:
+    """Per regression output and row: the value at the low and the high end of every assumption left open."""
+    if not assumed or not rows:
+        return {}
+    assumptions = uc.manifest.scenario.assumptions
+    variants = [(a.low_label, name, a.low) for name, a in assumptions.items() if name in assumed]
+    variants += [(a.high_label, name, a.high) for name, a in assumptions.items() if name in assumed]
+    result: dict[str, list[dict[str, float]]] = {}
+    for label, name, value in variants:
+        matrix = uc.validator.to_matrix([{**row, name: value} for row in rows])
+        for om in uc.model.outputs.values():
+            if om.descriptor["task_type"] != "regression":
+                continue
+            values = om.runner.predict(matrix).values
+            per_row = result.setdefault(om.name, [{} for _ in rows])
+            for i in range(len(rows)):
+                per_row[i][label] = round(PredictionService._bounded(om.descriptor, float(values[i]))[0], 6)
+    return result
+
+
+def _assumed_note(uc: UseCase, assumed: list[str]) -> dict[str, Any]:
+    assumptions = uc.manifest.scenario.assumptions
+    return {name: {"label": assumptions[name].label, "value": assumptions[name].typical,
+                   "note": f"not given, so the usual value is used; 'outlook' shows {assumptions[name].low_label} "
+                           f"({assumptions[name].low:g}) and {assumptions[name].high_label} ({assumptions[name].high:g})"}
+            for name in assumed}
+
+
+def _describe_scenario(uc: UseCase, schema: dict[str, Any]) -> dict[str, Any] | None:
+    described = describe_scenario(uc.manifest.scenario, schema, _scenario_descriptors(uc))
+    if described is not None and uc.manifest.scenario.assumptions:
+        # Inputs a caller may leave out: the service then uses the usual value and shows the outlook.
+        described["assumptions"] = [{"name": name, **a.model_dump()} for name, a in uc.manifest.scenario.assumptions.items()]
+    return described
