@@ -22,6 +22,8 @@ class OnnxRunner:
         self._outputs = [o.name for o in self._session.get_outputs()]
         self._task = descriptor["task_type"]
         self._classes = descriptor.get("classes")
+        # Yes/no outputs: the second class from this probability on (older models: the most probable class).
+        self._threshold = descriptor.get("decision_threshold")
 
     def predict(self, features: np.ndarray) -> RunnerOutput:
         raw = dict(zip(self._outputs, self._session.run(None, {self._input: features.astype(np.float32)})))
@@ -29,8 +31,12 @@ class OnnxRunner:
             return RunnerOutput(values=[float(v) for v in raw[self._outputs[0]].ravel()])
         if self._task == "classification":
             probabilities = raw["probabilities"]
+            if self._threshold is None:
+                chosen = probabilities.argmax(axis=1)
+            else:
+                chosen = (probabilities[:, 1] >= self._threshold).astype(int)
             return RunnerOutput(
-                values=[self._classes[i] for i in probabilities.argmax(axis=1)],
+                values=[self._classes[i] for i in chosen],
                 probabilities=[
                     {label: float(p) for label, p in zip(self._classes, row)} for row in probabilities
                 ],

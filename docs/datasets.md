@@ -445,7 +445,8 @@ And the best-plan finder (`--check-finder`, 80 batches, compared with the batch'
 advice gains **€0.25 per plant** on the true outcomes, 80% of the best possible in hindsight (€0.31), and none
 of the advice made a batch worse. Without being told, it proposes what Dutch growers do: about 17 weeks of
 raising, 11 weeks of warm growth, then 8 weeks of cooling at 19 °C, and a longer warm phase for greenhouses
-with less light.
+with less light. (Measured before the finder looked between grid values. With that it cools at 20 °C and gains
+19% more on 40 unseen batches, see `docs/scenarios.md`.)
 
 Two things we had to get right in the money, or the finder gave nonsense:
 
@@ -544,6 +545,28 @@ The harvest models (`greenhouse-harvest-timing`, `tomato-season`) are not covere
 | The real data holds no "what if" for yield (greenhouses within 5% of each other) | A crop model fitted and tested on the real greenhouses generates the seasons; the trained model is checked against it | Harvest 5 months ahead: 5.5% off, 35% better than a plain guess, effects match the answer key |
 | Linear and trees each miss something on small data | New candidate: the blend (average of both) | Wins on arable yield (MAE 4.22 → 4.09) and plants sold (4,142 → 3,894) |
 | pandas 3 stores dates in microseconds; interpolating on nanoseconds silently froze the gas price | Explicit conversion + a test on the 2022 crisis | Caught by our own sanity check |
+| Linear models read a category code as a number (AI4I quality H=0, L=1, M=2) | One 0/1 column per category for the linear models | absence-forecast MAE 0.967 → 0.868, arable yield 4.09 → 3.85 t/ha |
+| A 50% cutoff for a yes/no answer, whatever the costs of the two mistakes | `decision_threshold` chosen on validation (F1, or `error_costs`), only moved for a clear gain | AI4I with LightGBM: stays 0.5 (it was noise); with costs 25:1 the test cost drops 7% |
+| The blend was always half and half | Its mix is chosen on validation | tomato-season heating MAE 52.7 → 49.6; best-plan advice +€2.03 → +€2.09 per m² |
+| With five levers the best-plan grid tries four values per lever | Local refinement between the grid values | Nursery advice: true gain per batch +5.1% (all 143 unseen batches) |
+
+### Measured on the model-quality branch, not applied
+
+Three more ideas were measured with the same checks and left out, so nobody has to try them again blind:
+
+- **Ranges as a share of the prediction** (wider for big numbers, normalised conformal prediction). The idea was
+  that nursery gas errors grow with the size of a batch. They do not: relative ranges were twice as wide there
+  (19,690 against 10,090 m³ on average). The trainer would only have picked them for the tomato harvests, where they
+  are narrower but cover even fewer test rows (5 months ahead: 64% → 56% inside the 80% range). Dropped.
+- **"Heat a week ago" as an input of `greenhouse-heating`** (now it is only the yardstick). For a greenhouse the
+  model never saw, it helps a lot: weekly error 32% → 26% (`check_greenhouse.py`), and on the 2024 final test
+  daily error 0.50 → 0.36 MJ/m², weekly 56% → 48%, the worst greenhouse 464% → 124%, season 60% → 42% (the plain
+  guess is still 23% there). But for a greenhouse the model knows, it gets a little worse (weekly 13.7% → 15.7%), the
+  first week of a greenhouse cannot be predicted, and the API needs one more input. A product decision, not made here.
+- **Other LightGBM settings** (smaller trees with sampling, or shallower trees with a penalty). No setting wins
+  everywhere: smaller trees take nursery electricity MAE 9,976 → 6,610 kWh (−34%) and gas −3%, but machine-failure F1
+  0.833 → 0.745 and the tomato harvests 2-4% worse. The gain is real but has to be chosen per use case on
+  validation, which is a change of its own.
 
 ## 6. Questions for the grower (12 November)
 

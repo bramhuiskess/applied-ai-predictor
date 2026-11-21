@@ -62,6 +62,22 @@ class TestBlocks(_Strict):
     group: str | None = None
 
 
+class ErrorCosts(_Strict):
+    """What the two mistakes of a yes/no output cost, to choose its cutoff by money. Only the ratio matters."""
+
+    missed: float = Field(gt=0, allow_inf_nan=False)        # it was "yes", the model said "no" (a failure nobody saw)
+    false_alarm: float = Field(gt=0, allow_inf_nan=False)   # the model said "yes", it was "no" (a needless check)
+
+
+def _check_decision(threshold: float | str, costs: ErrorCosts | None, task: str) -> None:
+    if threshold != "auto" and not 0.0 < threshold < 1.0:
+        raise ValueError("'decision_threshold' is a probability between 0 and 1, or \"auto\"")
+    if threshold != "auto" and costs is not None:
+        raise ValueError("give either a fixed 'decision_threshold' or 'error_costs' to choose it, not both")
+    if (threshold != "auto" or costs is not None) and task not in ("auto", "classification"):
+        raise ValueError("'decision_threshold'/'error_costs' only apply to a yes/no (classification) output")
+
+
 # The models a use case may be trained with, per task. A plain table so `core` needs no ML library; a test
 # keeps it equal to `trainer.models.candidates`.
 ALGORITHMS: dict[str, tuple[str, ...]] = {
@@ -93,9 +109,14 @@ class OutputConfig(_Strict):
     baseline: Baseline | None = None
     # Which models may be trained for this output: one name forces it, several restrict the contest.
     algorithms: list[str] | None = Field(default=None, min_length=1)
+    # Yes/no outputs: the probability from which the answer is "yes". "auto" chooses it on the validation split
+    # (the best F1, or the lowest cost with `error_costs`); a number fixes it.
+    decision_threshold: float | Literal["auto"] = "auto"
+    error_costs: ErrorCosts | None = None
 
     @model_validator(mode="after")
     def _check(self) -> OutputConfig:
+        _check_decision(self.decision_threshold, self.error_costs, self.task)
         if (self.target_min is not None or self.target_max is not None) and self.task not in ("auto", "regression"):
             raise ValueError("'target_min'/'target_max' only apply to regression")
         if self.target_min is not None and self.target_max is not None and self.target_min >= self.target_max:
@@ -126,11 +147,15 @@ class TrainingConfig(_Strict):
     anomaly_share: float = Field(default=0.05, gt=0.0, le=0.5)
     test_fraction: float = Field(default=0.2, gt=0.0, lt=0.9)
     units: dict[str, str] = {}
+    # Yes/no target: the probability from which the answer is "yes" (see OutputConfig).
+    decision_threshold: float | Literal["auto"] = "auto"
+    error_costs: ErrorCosts | None = None
 
     @model_validator(mode="after")
     def _check_consistency(self) -> TrainingConfig:
         if self.outputs:
             self._check_outputs()
+        _check_decision(self.decision_threshold, self.error_costs, self.task)
         if self.task == "anomaly" and self.target:
             raise ValueError("an anomaly use case has no target; use 'evaluation_label' to score it")
         if self.task in ("regression", "classification") and not self.target and not self.outputs:
@@ -160,6 +185,8 @@ class TrainingConfig(_Strict):
             raise ValueError("with 'outputs', set 'task' per output, not at the top level")
         if self.target_min is not None or self.target_max is not None or self.baseline:
             raise ValueError("with 'outputs', set 'target_min'/'target_max'/'baseline' per output")
+        if self.decision_threshold != "auto" or self.error_costs is not None:
+            raise ValueError("with 'outputs', set 'decision_threshold'/'error_costs' per output")
         if self.horizon_steps:
             raise ValueError("'outputs' is not supported together with 'horizon_steps' yet")
         if self.evaluation_label:
@@ -187,7 +214,8 @@ class TrainingConfig(_Strict):
         if self.target:
             return {self.target: OutputConfig(task=self.task, unit=self.units.get(self.target),
                                               target_min=self.target_min, target_max=self.target_max,
-                                              baseline=self.baseline)}
+                                              baseline=self.baseline, decision_threshold=self.decision_threshold,
+                                              error_costs=self.error_costs)}
         return {}
 
     @property
@@ -206,6 +234,7 @@ class TrainingConfig(_Strict):
         return self.model_copy(update={
             "target": name, "outputs": {}, "task": config.task, "target_min": config.target_min,
             "target_max": config.target_max, "baseline": config.baseline, "units": units,
+            "decision_threshold": config.decision_threshold, "error_costs": config.error_costs,
             "drop_columns": [*self.drop_columns, *others]})
 
 

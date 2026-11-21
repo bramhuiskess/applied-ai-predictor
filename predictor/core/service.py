@@ -143,9 +143,10 @@ class PredictionService:
             "target_name": descriptor.get("target_name"),
             "target_unit": descriptor.get("target_unit"),
             "classes": descriptor.get("classes"),
+            "decision_threshold": descriptor.get("decision_threshold"),
             "metrics": descriptor.get("metrics"),
             "trained_at": descriptor.get("trained_at"),
-            "outputs": {name: _summary(om.descriptor, "classes", "metrics", "trained_at")
+            "outputs": {name: _summary(om.descriptor, "classes", "decision_threshold", "metrics", "trained_at")
                         for name, om in uc.model.outputs.items()},
             "inputs": [
                 {
@@ -307,13 +308,7 @@ class PredictionService:
             raise RequestRejected(problems, detail="invalid scenario request")
 
         plans = planning.grid(scenario, levers)
-        requested = [{"name": f"plan {i + 1}", "changes": {k: {"set": v} for k, v in plan.items()}} for i, plan in enumerate(plans)]
-        resolved = self._resolve(uc, base.get("features"), requested)
-        rows = [resolved.base] + [s.features for s in resolved.scenarios]
-        outputs = self._outputs(uc, rows)
-        sure = self._certainty(uc, rows)
-        self._add_ranges(uc, outputs, sure, rows, resolved.assumed)
-        self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
+        resolved, rows, outputs, sure = self._calculate_plans(uc, base, plans)
         properties = uc.model.feature_schema["properties"]
 
         def score(comparison: dict[str, Any]) -> float:
@@ -322,16 +317,30 @@ class PredictionService:
             change = comparison["outputs"][objective["output"]].get("change", 0.0)
             return float(change if objective["goal"] == "highest" else -change)
 
-        candidates, low_certainty, outside = [], 0, 0
-        for plan, s, out, c in zip(plans, resolved.scenarios, outputs[1:], sure[1:]):
-            comparison = compare(scenario, descriptors, resolved.base, outputs[0], s.features, out)
-            beyond = ranges.outside_training(properties, s.features)
-            level = c["level"] if c else None
-            ok = planning.allowed(level, min_certainty) and not beyond
-            low_certainty += not planning.allowed(level, min_certainty)
-            outside += bool(beyond)
-            candidates.append({"plan": plan, "scenario": s, "out": out, "certainty": c, "score": score(comparison),
-                               "comparison": comparison, "ok": ok})
+        def rank(plans, scenarios, plan_outputs, plan_sure) -> list[dict[str, Any]]:
+            found = []
+            for plan, s, out, c in zip(plans, scenarios, plan_outputs, plan_sure):
+                comparison = compare(scenario, descriptors, resolved.base, outputs[0], s.features, out)
+                beyond = ranges.outside_training(properties, s.features)
+                certain = planning.allowed(c["level"] if c else None, min_certainty)
+                found.append({"plan": plan, "scenario": s, "out": out, "certainty": c, "score": score(comparison),
+                              "comparison": comparison, "ok": certain and not beyond,
+                              "low_certainty": not certain, "outside": bool(beyond)})
+            return found
+
+        def calculate(more: list[dict[str, float]]) -> list[dict[str, Any]]:
+            more_resolved, more_rows, more_outputs, more_sure = self._calculate_plans(uc, base, more)
+            rows.extend(more_rows[1:])
+            return rank(more, more_resolved.scenarios, more_outputs[1:], more_sure[1:])
+
+        candidates = rank(plans, resolved.scenarios, outputs[1:], sure[1:])
+        # With many levers the grid is coarse: look between its values around the best plans.
+        coarse = planning.coarse_levers(scenario, levers)
+        refined = planning.refine(scenario, candidates, coarse, calculate) if coarse else []
+        candidates += refined
+        self._monitor(uc, started, predicted=len(rows), rejected=0, warnings=0, rows=rows)
+        low_certainty = sum(item["low_certainty"] for item in candidates)
+        outside = sum(item["outside"] for item in candidates)
         candidates.sort(key=lambda item: -item["score"])
         trusted = [item for item in candidates if item["ok"]]
 
@@ -367,7 +376,8 @@ class PredictionService:
             **self._header(uc),
             "objective": objective or {"output": "net_eur", "goal": "highest"},
             "levers": levers,
-            "searched": {"plans": len(plans), "trusted": len(trusted), "left_out_low_certainty": int(low_certainty),
+            "searched": {"plans": len(candidates), "refined": len(refined), "trusted": len(trusted),
+                         "left_out_low_certainty": int(low_certainty),
                          "left_out_outside_training_data": int(outside), "min_certainty": min_certainty,
                          "min_gain": round(threshold, 4), "typical_error": round(typical, 4) if typical else None},
             "base": {"record_id": base.get("record_id"), "features": resolved.base, "warnings": resolved.base_warnings,
@@ -381,6 +391,16 @@ class PredictionService:
                                      "for this plan or it lies outside its training data"} if unlimited else None),
             "advice": advice,
         }
+
+    def _calculate_plans(self, uc: UseCase, base: dict[str, Any], plans: list[dict[str, float]]):
+        """The base and every plan through the scenario engine, in one batch: (resolved, rows, outputs, certainty)."""
+        requested = [{"name": f"plan {i + 1}", "changes": {k: {"set": v} for k, v in plan.items()}} for i, plan in enumerate(plans)]
+        resolved = self._resolve(uc, base.get("features"), requested)
+        rows = [resolved.base] + [s.features for s in resolved.scenarios]
+        outputs = self._outputs(uc, rows)
+        sure = self._certainty(uc, rows)
+        self._add_ranges(uc, outputs, sure, rows, resolved.assumed)
+        return resolved, rows, outputs, sure
 
     def _scenario_use_case(self, use_case_id: str) -> UseCase:
         uc = self._ready(use_case_id)

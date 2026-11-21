@@ -10,8 +10,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from lightgbm import Booster, LGBMClassifier, LGBMRegressor
+from onnx import TensorProto
 from onnxmltools.convert.lightgbm.operator_converters.LightGbm import convert_lightgbm
 from skl2onnx import convert_sklearn, update_registered_converter
+from skl2onnx.algebra.onnx_ops import OnnxCast, OnnxConcat, OnnxEqual, OnnxGather, OnnxIdentity
 from skl2onnx.common.data_types import FloatTensorType
 from skl2onnx.common.shape_calculator import (
     calculate_linear_classifier_output_shapes,
@@ -22,7 +24,7 @@ from sklearn.ensemble import VotingRegressor
 from sklearn.pipeline import Pipeline
 
 from predictor.adapters.onnx_runner import OnnxRunner
-from predictor.trainer.models import SignConstrainedLinearRegression
+from predictor.trainer.models import CategoryIndicators, SignConstrainedLinearRegression
 
 TARGET_OPSET = {"": 17, "ai.onnx.ml": 3}
 PARITY_RTOL = 1e-4
@@ -42,6 +44,30 @@ update_registered_converter(
     SignConstrainedLinearRegression, "SignConstrainedLinearRegression", calculate_linear_regressor_output_shapes,
     convert_sklearn_linear_regressor,
 )
+
+
+# CategoryIndicators in ONNX: the numbers as they are, then Equal(code) cast to 0/1 for every category column.
+def _indicators_shape(operator) -> None:
+    rows = operator.inputs[0].get_first_dimension()
+    operator.outputs[0].type = FloatTensorType([rows, len(operator.raw_operator.sources())])
+
+
+def _convert_indicators(scope, operator, container) -> None:
+    step, opv, features = operator.raw_operator, container.target_opset, operator.inputs[0]
+    parts = []
+    if step.numeric_:
+        parts.append(OnnxGather(features, np.array(step.numeric_, dtype=np.int64), axis=1, op_version=opv))
+    if step.columns_:
+        codes = OnnxGather(features, np.array(step.columns_, dtype=np.int64), axis=1, op_version=opv)
+        same = OnnxEqual(codes, np.array([step.codes_], dtype=np.float32), op_version=opv)
+        parts.append(OnnxCast(same, to=TensorProto.FLOAT, op_version=opv))
+    outputs = operator.outputs[:1]
+    node = (OnnxConcat(*parts, axis=1, op_version=opv, output_names=outputs) if len(parts) > 1
+            else OnnxIdentity(parts[0], op_version=opv, output_names=outputs))
+    node.add_to(scope, container)
+
+
+update_registered_converter(CategoryIndicators, "CategoryIndicators", _indicators_shape, _convert_indicators)
 
 
 def make_thresholds_float32_safe(model: Pipeline) -> None:
@@ -107,7 +133,9 @@ def check_parity(model: Pipeline, artifact: bytes, X: pd.DataFrame, descriptor: 
         classes = descriptor["classes"]
         expected = model.predict_proba(X32)
         actual = np.array([[p[c] for c in classes] for p in out.probabilities])
-        agreement = float(np.mean(np.array([classes.index(v) for v in out.values]) == expected.argmax(axis=1)))
+        threshold = descriptor.get("decision_threshold")
+        labels = (expected[:, 1] >= threshold).astype(int) if threshold is not None else expected.argmax(axis=1)
+        agreement = float(np.mean(np.array([classes.index(v) for v in out.values]) == labels))
     else:
         expected, actual = model.decision_function(X32), np.array(out.scores)
         labels = np.where(model.predict(X32) == -1, "anomaly", "normal")
